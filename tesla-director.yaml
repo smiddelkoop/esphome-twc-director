@@ -115,6 +115,7 @@ twc_director:
   global_twc_max_current: ${global_twc_max_current}
   master_mode:
     id: twc_master_mode
+  charging_count:
   link_ok:
     name: RS-485 Link
   evse:

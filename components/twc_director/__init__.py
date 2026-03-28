@@ -50,6 +50,7 @@ CONF_GLOBAL_MAX_CURRENT = "global_max_current"
 CONF_GLOBAL_MAX_CURRENT_CONTROL = "global_max_current_control"
 CONF_EVSE_MAX_CURRENT_LIMIT = "global_twc_max_current"
 CONF_LINK_OK = "link_ok"
+CONF_CHARGING_COUNT = "charging_count"
 
 CONF_EVSE = "evse"
 CONF_ADDRESS = "address"
@@ -177,6 +178,15 @@ CONFIG_SCHEMA = (
                     unit_of_measurement=UNIT_AMPERE,
                     icon=ICON_CURRENT_AC,
                     device_class=DEVICE_CLASS_CURRENT,
+                ),
+            ),
+
+            # Optional sensor: number of EVSEs currently charging
+            cv.Optional(CONF_CHARGING_COUNT): cv.All(
+                _with_default_name("Charging Count"),
+                sensor.sensor_schema(
+                    icon="mdi:ev-station",
+                    state_class=STATE_CLASS_MEASUREMENT,
                 ),
             ),
 
@@ -381,6 +391,10 @@ async def to_code(config):
             step=1.0,
         )
     cg.add(var.set_global_max_current_control(global_max_control))
+
+    if CONF_CHARGING_COUNT in config:
+        charging_count_sensor = await sensor.new_sensor(config[CONF_CHARGING_COUNT])
+        cg.add(var.set_charging_count_sensor(charging_count_sensor))
 
     if CONF_LINK_OK in config:
         link_ok_conf = config[CONF_LINK_OK]

@@ -174,6 +174,10 @@ class TWCDirectorComponent : public Component, public uart::UARTDevice {
     this->link_ok_sensor_ = sensor;
   }
 
+  void set_charging_count_sensor(sensor::Sensor *sensor) {
+    this->charging_count_sensor_ = sensor;
+  }
+
   // Optional master mode switch. We only store this pointer and expose a
   // simple helper for reading its current state.
   void set_master_mode_switch(TWCDirectorMasterModeSwitch *sw) {
@@ -318,6 +322,7 @@ class TWCDirectorComponent : public Component, public uart::UARTDevice {
  protected:
   TWCDirectorMasterModeSwitch *master_mode_switch_{nullptr};
   binary_sensor::BinarySensor *link_ok_sensor_{nullptr};
+  sensor::Sensor *charging_count_sensor_{nullptr};
 
   bool master_mode_last_state_{false};
 

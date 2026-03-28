@@ -420,6 +420,16 @@ void TWCDirectorComponent::update_evse_metrics_(uint32_t now) {
     // Update all sensors from core state
     this->update_evse_sensors_(evse, now);
   }
+
+  // Publish count of EVSEs currently charging
+  if (this->charging_count_sensor_) {
+    int count = 0;
+    for (const auto &evse : this->evse_entries_) {
+      if (evse.bound && evse.last_session_amps > 0.1f)
+        count++;
+    }
+    this->publish_sensor_(this->charging_count_sensor_, static_cast<float>(count));
+  }
 }
 
 void TWCDirectorComponent::sync_desired_current_(EvseEntry &evse) {
