@@ -277,6 +277,15 @@ bool twc_core_handle_frame(twc_core_t *core,
     dev->last_current_available_a = old_current_available;
     // Trigger session current reconciliation when charging state changes
     reconcile_session_current_allocation(core, 0);  // No priority device
+
+    // When charging stops, reset applied tracking so commands are re-sent
+    // on next session start. Without this, the 0x05 frame isn't re-sent
+    // when a car stays plugged in through a stop/start cycle (because
+    // car_just_connected only fires on VIN transitions).
+    if (!now_drawing) {
+      dev->applied_initial_current_a = -1.0f;
+      dev->applied_session_current_a = -1.0f;
+    }
   }
 
   // MASTER MODE: Auto-respond to unconfigured peripherals

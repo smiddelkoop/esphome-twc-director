@@ -121,9 +121,12 @@ void TWCDirectorComponent::setup() {
   twc_core_set_autobind_callback(&this->core_, &autobind_callback_shim, this);
   twc_core_set_log_callback(&this->core_, &log_callback_shim, this);
 
-  // Initialize all EVSE slots as offline
+  // Initialize all EVSE slots as offline with session current at 0
   for (auto &evse : evse_entries_) {
     this->publish_binary_sensor_if_changed_(evse.online, false);
+    if (evse.session_current) {
+      evse.session_current->publish_state(0.0f);
+    }
   }
 }
 
@@ -510,6 +513,10 @@ void TWCDirectorComponent::update_evse_sensors_(EvseEntry &evse, uint32_t now) {
         ESP_LOGI(TAG, "TWC 0x%04X: charging started (%.1fA), syncing session current number to %.1fA",
                  evse.address, session_amps, available_a);
         evse.session_current->publish_state(available_a);
+        // Also update the core's desired session current so it stays in sync
+        // with the published number. Without this, desired stays at 0 and
+        // setting the number to the same value won't trigger control().
+        twc_core_set_desired_session_current(&this->core_, evse.address, available_a);
       }
     } else if (!was_zero && !is_nonzero) {
       // >0 → 0: charging stopped, reset session current number to 0
