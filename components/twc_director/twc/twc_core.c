@@ -649,14 +649,28 @@ static bool send_heartbeat(twc_core_t *core, uint32_t now_ms) {
     uint16_t available_centiamps = 0u;
     uint16_t delivered_centiamps = 0u;
 
-    if (mode == TWC_MODE_UNCONF_PERIPHERAL) {
-      // All zeros for unconfigured
-      charge_state = 0u;
-      available_centiamps = 0u;
-      delivered_centiamps = 0u;
-    } else {
-      float dev_max = get_device_max_current(dev);
+    float dev_max = get_device_max_current(dev);
 
+    if (mode == TWC_MODE_UNCONF_PERIPHERAL) {
+      // For unconfigured peripherals, only allow the initial current command.
+      // The TWC requires a non-zero current offer (0x05) to transition from
+      // UNCONF_PERIPHERAL to PERIPHERAL. Without this, sending all-zeros creates
+      // a permanent deadlock: director sends zeros -> TWC stays unconfigured ->
+      // director keeps sending zeros.
+      // Session, increase and decrease commands remain blocked until fully configured.
+      if (dev->pending_initial_current_cmd) {
+        float current_a = dev->last_initial_current_cmd_a;
+        if (current_a < 0.0f) current_a = 0.0f;
+        if (current_a > dev_max) current_a = dev_max;
+        charge_state = 0x05u;
+        available_centiamps = (uint16_t)(current_a * 100.0f + 0.5f);
+        delivered_centiamps = 0u;
+      } else {
+        charge_state = 0u;
+        available_centiamps = 0u;
+        delivered_centiamps = 0u;
+      }
+    } else {
       // Prioritize 0x09 session current over 0x05 initial current
       if (dev->pending_session_current_cmd) {
         float current_a = dev->last_session_current_cmd_a;
