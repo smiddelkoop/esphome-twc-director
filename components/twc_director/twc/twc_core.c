@@ -288,12 +288,18 @@ bool twc_core_handle_frame(twc_core_t *core,
     }
   }
 
-  // MASTER MODE: Immediate response to unconfigured peripheral E2 announcement.
-  // When the TWC sends its E2 presence frame, respond immediately with a
-  // heartbeat carrying the current offer (0x05 + avail) if one is pending.
-  // The TWC may treat the DIRECT response to its E2 as the definitive offer,
-  // so sending zeros here (even if 0x05 follows later in the heartbeat cycle)
-  // can prevent the mode transition from UNCONF_PERIPHERAL to PERIPHERAL.
+  // MASTER MODE: Immediate claim response to unconfigured peripheral E2.
+  //
+  // TWC Gen 2 uses a two-phase protocol for UNCONF_PERIPHERAL -> PERIPHERAL:
+  //   Phase 1 (Claim):  master sends E0 state=0x00 (TWC_HB_READY, zeros)
+  //                     -> TWC registers this master and responds to further E0s
+  //   Phase 2 (Offer):  master sends E0 state=0x05 + avail centiamps
+  //                     -> TWC transitions to PERIPHERAL mode
+  //
+  // The TWC ignores E0 frames with state != 0x00 until it has been claimed.
+  // Therefore the direct response to the TWC's E2 announcement MUST be
+  // state=0x00. The current offer (state=0x05) follows in the next periodic
+  // heartbeat (~1 second later), by which point the TWC has accepted the claim.
   if (core->master_mode && core->tx_cb &&
       marker == TWC_MARKER_RESPONSE &&
       cmd == TWC_CMD_PERIPHERAL_NEGOTIATION) {
@@ -302,23 +308,10 @@ bool twc_core_handle_frame(twc_core_t *core,
                         new_mode == TWC_MODE_UNKNOWN);
 
     if (needs_claim) {
-      // Use the pending current offer if available; fall back to zeros (ready)
-      uint8_t claim_state = (uint8_t)TWC_HB_READY;  // 0x00
-      uint16_t claim_avail = 0u;
-
-      if (dev->pending_initial_current_cmd && dev->last_initial_current_cmd_a > 0.0f) {
-        float dev_max = get_device_max_current(dev);
-        float current_a = dev->last_initial_current_cmd_a;
-        if (current_a < 0.0f) current_a = 0.0f;
-        if (current_a > dev_max) current_a = dev_max;
-        claim_state = 0x05u;
-        claim_avail = (uint16_t)(current_a * 100.0f + 0.5f);
-      }
-
       uint8_t claim_frame[16];
       size_t claim_len = twc_build_heartbeat_frame(
           core->master_address, dev->address,
-          claim_state, claim_avail, 0u,
+          (uint8_t)TWC_HB_READY, 0u, 0u,
           claim_frame, sizeof(claim_frame)
       );
 
@@ -690,12 +683,10 @@ static bool send_heartbeat(twc_core_t *core, uint32_t now_ms) {
     float dev_max = get_device_max_current(dev);
 
     if (mode == TWC_MODE_UNCONF_PERIPHERAL) {
-      // For unconfigured peripherals, only allow the initial current command.
-      // The TWC requires a non-zero current offer (0x05) to transition from
-      // UNCONF_PERIPHERAL to PERIPHERAL. Without this, sending all-zeros creates
-      // a permanent deadlock: director sends zeros -> TWC stays unconfigured ->
-      // director keeps sending zeros.
-      // Session, increase and decrease commands remain blocked until fully configured.
+      // For unconfigured peripherals, send the initial current offer (0x05)
+      // in the periodic heartbeat. The TWC must first be claimed via the
+      // immediate state=0x00 response to its E2 announcement (see
+      // twc_core_handle_frame), then the 0x05 offer follows here.
       if (dev->pending_initial_current_cmd) {
         float current_a = dev->last_initial_current_cmd_a;
         if (current_a < 0.0f) current_a = 0.0f;
@@ -770,8 +761,8 @@ static bool send_heartbeat(twc_core_t *core, uint32_t now_ms) {
     // Clear pending flags after successful send.
     // Exception: for UNCONF_PERIPHERAL, keep pending_initial_current_cmd set
     // so the 0x05 offer is resent every heartbeat until the TWC transitions
-    // to PERIPHERAL mode (status byte changes from 0x80). The TWC requires
-    // repeated offers before it will acknowledge and configure itself.
+    // to PERIPHERAL mode. The TWC requires repeated offers; clearing on first
+    // send would cause the offer to stop being sent prematurely.
     if (charge_state == 0x05u) {
       if (mode != TWC_MODE_UNCONF_PERIPHERAL) {
         dev->pending_initial_current_cmd = false;
