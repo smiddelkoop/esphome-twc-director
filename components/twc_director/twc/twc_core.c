@@ -423,6 +423,18 @@ static void reconcile_current_allocation(twc_core_t *core) {
     if (changed || car_just_connected) {
       dev->pending_initial_current_cmd = true;
       dev->last_initial_current_cmd_a = applied;
+
+      // DIAGNOSTIC: log whenever pending_initial_current_cmd is set
+      if (core->log_cb) {
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "DIAG reconcile 0x%04X: desired=%.1f applied=%.1f changed=%d"
+                 " car=%d -> pending_initial=true cmd_a=%.1f",
+                 dev->address, dev->desired_initial_current_a,
+                 applied, changed ? 1 : 0, car_just_connected ? 1 : 0,
+                 dev->last_initial_current_cmd_a);
+        core->log_cb(TWC_LOG_WARNING, msg, core->log_user);
+      }
     }
 
     // Notify application
@@ -642,6 +654,22 @@ static bool send_heartbeat(twc_core_t *core, uint32_t now_ms) {
     twc_mode_t mode = twc_device_get_mode(&dev->device);
     if (mode != TWC_MODE_PERIPHERAL && mode != TWC_MODE_UNCONF_PERIPHERAL) {
       continue;
+    }
+
+    // DIAGNOSTIC: log state at every heartbeat decision point
+    if (core->log_cb) {
+      char msg[160];
+      snprintf(msg, sizeof(msg),
+               "DIAG heartbeat 0x%04X: mode=%d desired=%.1f applied=%.1f"
+               " pending_init=%d pending_sess=%d cmd_a=%.1f global_max=%.1f",
+               dev->address, (int)mode,
+               dev->desired_initial_current_a,
+               dev->applied_initial_current_a,
+               dev->pending_initial_current_cmd ? 1 : 0,
+               dev->pending_session_current_cmd ? 1 : 0,
+               dev->last_initial_current_cmd_a,
+               core->global_max_current_a);
+      core->log_cb(TWC_LOG_WARNING, msg, core->log_user);
     }
 
     // Determine charge state and currents
