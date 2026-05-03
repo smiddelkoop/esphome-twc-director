@@ -333,7 +333,11 @@ static bool handle_startup_burst(twc_core_t *core, uint32_t now_ms) {
   uint8_t frame[16];
   size_t frame_len = 0;
 
-  // Send E1 frames, then E2 frames
+  // Send E1 (CONTROLLER_NEGOTIATION) frames to claim master role.
+  // NOTE: E2 (PERIPHERAL_PAUSE) frames are deliberately omitted.
+  // Sending PERIPHERAL_PAUSE before any peripheral has been discovered
+  // silences the TWC (it stops sending E2 presence announcements), which
+  // prevents discovery and creates a permanent boot-time deadlock.
   if (core->startup_burst_e1_sent < TWC_STARTUP_BURST_E1_COUNT) {
     frame_len = twc_build_controller_negotiation_frame(
         core->master_address,
@@ -346,21 +350,9 @@ static bool handle_startup_burst(twc_core_t *core, uint32_t now_ms) {
       core->startup_burst_last_ms = now_ms;
       return true;
     }
-  } else if (core->startup_burst_e2_sent < TWC_STARTUP_BURST_E2_COUNT) {
-    frame_len = twc_build_peripheral_pause_frame(
-        core->master_address,
-        core->master_session_id,
-        frame, sizeof(frame)
-    );
-    if (frame_len > 0) {
-      core->tx_cb(frame, frame_len, core->tx_user);
-      core->startup_burst_e2_sent++;
-      core->startup_burst_last_ms = now_ms;
-      return true;
-    }
   }
 
-  // Burst complete
+  // Burst complete (E2/PERIPHERAL_PAUSE skipped intentionally)
   core->startup_burst_active = false;
   return false;
 }
