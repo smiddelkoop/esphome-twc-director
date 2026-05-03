@@ -749,9 +749,15 @@ static bool send_heartbeat(twc_core_t *core, uint32_t now_ms) {
     core->tx_cb(frame, frame_len, core->tx_user);
     core->last_e0_heartbeat_ms = now_ms;
 
-    // Clear pending flags after successful send
+    // Clear pending flags after successful send.
+    // Exception: for UNCONF_PERIPHERAL, keep pending_initial_current_cmd set
+    // so the 0x05 offer is resent every heartbeat until the TWC transitions
+    // to PERIPHERAL mode (status byte changes from 0x80). The TWC requires
+    // repeated offers before it will acknowledge and configure itself.
     if (charge_state == 0x05u) {
-      dev->pending_initial_current_cmd = false;
+      if (mode != TWC_MODE_UNCONF_PERIPHERAL) {
+        dev->pending_initial_current_cmd = false;
+      }
     } else if (charge_state == 0x09u) {
       dev->pending_session_current_cmd = false;
     } else if (charge_state == 0x06u) {
