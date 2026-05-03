@@ -291,7 +291,7 @@ bool twc_core_handle_frame(twc_core_t *core,
   // MASTER MODE: Immediate claim response to unconfigured peripheral E2.
   // Send state=0x00 (TWC_HB_READY) as the direct response to the TWC's
   // presence announcement. This establishes the master-slave link.
-  // The current offer (0x05) follows in the next periodic heartbeat.
+  // The current offer (0x05) follows after TWC_MIN_CLAIM_HB_COUNT heartbeats.
   if (core->master_mode && core->tx_cb &&
       marker == TWC_MARKER_RESPONSE &&
       cmd == TWC_CMD_PERIPHERAL_NEGOTIATION) {
@@ -625,6 +625,14 @@ static bool send_info_probe(twc_core_t *core, uint32_t now_ms) {
   return false;
 }
 
+// Minimum number of state=0x00 (claim) heartbeats to send before escalating
+// to state=0x05 (current offer) for UNCONF_PERIPHERAL devices.
+// This ensures the master-slave link is established regardless of whether
+// the TWC was already seen on the bus during the boot window (which sets
+// last_frame_ms immediately, making that check unreliable as a gate).
+// At 1 heartbeat/second, 5 heartbeats = 5 seconds of 0x00 claims.
+#define TWC_MIN_CLAIM_HB_COUNT 5u
+
 static bool send_heartbeat(twc_core_t *core, uint32_t now_ms) {
   if (core->last_e0_heartbeat_ms != 0u) {
     uint32_t elapsed = (now_ms >= core->last_e0_heartbeat_ms)
@@ -656,7 +664,7 @@ static bool send_heartbeat(twc_core_t *core, uint32_t now_ms) {
       char msg[192];
       snprintf(msg, sizeof(msg),
                "DIAG heartbeat 0x%04X: mode=%d desired=%.1f applied=%.1f"
-               " pending_init=%d pending_sess=%d cmd_a=%.1f global_max=%.1f seen=%d",
+               " pending_init=%d pending_sess=%d cmd_a=%.1f global_max=%.1f e0cnt=%u",
                dev->address, (int)mode,
                dev->desired_initial_current_a,
                dev->applied_initial_current_a,
@@ -664,7 +672,7 @@ static bool send_heartbeat(twc_core_t *core, uint32_t now_ms) {
                dev->pending_session_current_cmd ? 1 : 0,
                dev->last_initial_current_cmd_a,
                core->global_max_current_a,
-               dev->last_frame_ms != 0u ? 1 : 0);
+               (unsigned)dev->e0_since_last_probe);
       core->log_cb(TWC_LOG_WARNING, msg, core->log_user);
     }
 
@@ -676,17 +684,17 @@ static bool send_heartbeat(twc_core_t *core, uint32_t now_ms) {
     float dev_max = get_device_max_current(dev);
 
     if (mode == TWC_MODE_UNCONF_PERIPHERAL) {
-      // For unconfigured peripherals, the TWC protocol is two-phase:
-      //   Phase 1 (Claim): master sends E0 state=0x00 until the TWC registers it.
-      //                    This happens via the immediate claim response to E2.
-      //   Phase 2 (Offer): master sends E0 state=0x05 + avail to configure the TWC.
+      // TWC Gen 2 requires a minimum number of state=0x00 (claim) heartbeats
+      // before it will accept a state=0x05 (current offer). The claim phase
+      // establishes the master-slave link. Sending 0x05 too early — before
+      // enough 0x00 frames have been sent — causes the TWC to ignore the offer.
       //
-      // Pre-configured YAML devices start with mode=UNCONF_PERIPHERAL before any
-      // E2 is ever received (last_frame_ms == 0). Sending state=0x05 at this point
-      // — before the master-slave link is established — causes the TWC to ignore the
-      // offer entirely. Send state=0x00 (ready/claim) until the first E2 is received
-      // (last_frame_ms != 0), then escalate to state=0x05 on subsequent heartbeats.
-      if (dev->pending_initial_current_cmd && dev->last_frame_ms != 0u) {
+      // Gate on e0_since_last_probe (counts heartbeats sent to this device since
+      // boot or last reset). This is boot-window-safe: even if last_frame_ms was
+      // set during the 11-second API connection delay, e0_since_last_probe starts
+      // at 0 and reliably tracks how many 0x00 claims have been issued.
+      if (dev->pending_initial_current_cmd &&
+          dev->e0_since_last_probe >= TWC_MIN_CLAIM_HB_COUNT) {
         float current_a = dev->last_initial_current_cmd_a;
         if (current_a < 0.0f) current_a = 0.0f;
         if (current_a > dev_max) current_a = dev_max;
@@ -694,7 +702,7 @@ static bool send_heartbeat(twc_core_t *core, uint32_t now_ms) {
         available_centiamps = (uint16_t)(current_a * 100.0f + 0.5f);
         delivered_centiamps = 0u;
       } else {
-        // Not yet seen on bus, or no pending offer: send ready (zeros) as claim
+        // Claim phase: send state=0x00 to establish master-slave link
         charge_state = 0u;
         available_centiamps = 0u;
         delivered_centiamps = 0u;
