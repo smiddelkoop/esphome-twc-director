@@ -288,7 +288,12 @@ bool twc_core_handle_frame(twc_core_t *core,
     }
   }
 
-  // MASTER MODE: Auto-respond to unconfigured peripherals
+  // MASTER MODE: Immediate response to unconfigured peripheral E2 announcement.
+  // When the TWC sends its E2 presence frame, respond immediately with a
+  // heartbeat carrying the current offer (0x05 + avail) if one is pending.
+  // The TWC may treat the DIRECT response to its E2 as the definitive offer,
+  // so sending zeros here (even if 0x05 follows later in the heartbeat cycle)
+  // can prevent the mode transition from UNCONF_PERIPHERAL to PERIPHERAL.
   if (core->master_mode && core->tx_cb &&
       marker == TWC_MARKER_RESPONSE &&
       cmd == TWC_CMD_PERIPHERAL_NEGOTIATION) {
@@ -297,10 +302,23 @@ bool twc_core_handle_frame(twc_core_t *core,
                         new_mode == TWC_MODE_UNKNOWN);
 
     if (needs_claim) {
+      // Use the pending current offer if available; fall back to zeros (ready)
+      uint8_t claim_state = (uint8_t)TWC_HB_READY;  // 0x00
+      uint16_t claim_avail = 0u;
+
+      if (dev->pending_initial_current_cmd && dev->last_initial_current_cmd_a > 0.0f) {
+        float dev_max = get_device_max_current(dev);
+        float current_a = dev->last_initial_current_cmd_a;
+        if (current_a < 0.0f) current_a = 0.0f;
+        if (current_a > dev_max) current_a = dev_max;
+        claim_state = 0x05u;
+        claim_avail = (uint16_t)(current_a * 100.0f + 0.5f);
+      }
+
       uint8_t claim_frame[16];
       size_t claim_len = twc_build_heartbeat_frame(
           core->master_address, dev->address,
-          TWC_HB_READY, 0, 0,
+          claim_state, claim_avail, 0u,
           claim_frame, sizeof(claim_frame)
       );
 
