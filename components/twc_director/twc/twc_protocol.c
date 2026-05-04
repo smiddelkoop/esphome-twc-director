@@ -94,7 +94,7 @@ bool twc_decode_frame(const uint8_t *frame,
                       const uint8_t **out_header,
                       const uint8_t **out_payload,
                       size_t *out_payload_len) {
-  if (frame == NULL || out_header == NULL || 
+  if (frame == NULL || out_header == NULL ||
       out_payload == NULL || out_payload_len == NULL) {
     return false;
   }
@@ -116,16 +116,16 @@ bool twc_decode_frame(const uint8_t *frame,
 
   // Extract header and payload
   *out_header = frame;
-  
+
   const size_t header_len = 4;
   const size_t payload_len = frame_len - header_len - 1;  // -1 for checksum
-  
+
   if (payload_len > 0) {
     *out_payload = frame + header_len;
   } else {
     *out_payload = NULL;
   }
-  
+
   *out_payload_len = payload_len;
 
   return true;
@@ -174,7 +174,7 @@ size_t twc_build_heartbeat_payload(uint16_t dest_address,
   out_payload[4] = (uint8_t)(current_available_centiamps & 0xFF);
   out_payload[5] = (uint8_t)((current_delivered_centiamps >> 8) & 0xFF);
   out_payload[6] = (uint8_t)(current_delivered_centiamps & 0xFF);
-  
+
   // Padding
   memset(out_payload + 7, 0x00, 4);
 
@@ -192,16 +192,16 @@ size_t twc_build_controller_negotiation_payload(uint8_t session_id,
   // Payload layout matches the TWC Gen2 linkready (presence) frame format:
   //   byte 0:    sign / session_id
   //   bytes 1-2: max_allowable_current in centiamps, big-endian
-  //              0x0C80 = 3200 cA = 32 A
+  //              0x0640 = 1600 cA = 16 A
   //              The TWC peripheral requires a non-zero value here to
   //              accept the master as valid and complete the handshake.
   //              Sending 0x0000 causes the TWC to ignore the master and
   //              keep broadcasting FD E2 indefinitely.
-  //              Reference: jnicolson/esphome-twc-controller hardcodes 0x0C80.
+  //              Reference: jnicolson/esphome-twc-controller hardcodes 0x0C80 (32A).
   //   bytes 3-10: padding zeros
   out_payload[0] = session_id;
-  out_payload[1] = 0x0Cu;  // max_allowable_current high byte
-  out_payload[2] = 0x80u;  // max_allowable_current low byte: 3200 cA = 32A
+  out_payload[1] = 0x06u;  // max_allowable_current high byte
+  out_payload[2] = 0x40u;  // max_allowable_current low byte: 1600 cA = 16A
   memset(out_payload + 3, 0x00, 8);
 
   return required;
@@ -264,27 +264,37 @@ bool twc_decode_peripheral_negotiation_payload(const uint8_t *payload,
 bool twc_decode_meter_payload(const uint8_t *payload,
                                size_t payload_len,
                                twc_meter_data_t *out) {
-  if (payload == NULL || out == NULL || payload_len < 15) {
+  if (payload == NULL || out == NULL || payload_len < 10) {
     return false;
   }
+
+  // FD EB frame payload layout (TWC Gen2 protocol reference):
+  //   bytes [0-3]:  kWh total since manufacturing (big-endian uint32)
+  //   bytes [4-5]:  voltage phase L1 in volts (big-endian uint16)
+  //   bytes [6-7]:  voltage phase L2 in volts (big-endian uint16)
+  //   bytes [8-9]:  voltage phase L3 in volts (big-endian uint16)
+  //   bytes [10+]:  padding zeros (Protocol 2 extension)
+  //
+  // IMPORTANT: There are NO per-phase current fields in this frame.
+  // The TWC Gen2 protocol does not transmit per-phase current measurements.
+  // Actual drawn current is in the FD E0 slave heartbeat (reportedActual).
 
   // Big-endian 32-bit total energy in kWh
   uint32_t total_kwh = ((uint32_t)payload[0] << 24) |
                        ((uint32_t)payload[1] << 16) |
                        ((uint32_t)payload[2] << 8)  |
                        ((uint32_t)payload[3]);
-
   out->total_energy_kwh = (float)total_kwh;
 
-  // Voltages (direct values)
-  out->phase_l2_v = (float)payload[4];
-  out->phase_l1_v = (float)payload[5];
-  out->phase_l3_v = (float)payload[6];
+  // Phase voltages: big-endian uint16, in volts
+  out->phase_l1_v = (float)(((uint16_t)payload[4] << 8) | payload[5]);
+  out->phase_l2_v = (float)(((uint16_t)payload[6] << 8) | payload[7]);
+  out->phase_l3_v = (float)(((uint16_t)payload[8] << 8) | payload[9]);
 
-  // Currents (0.5A units)
-  out->phase_l2_a = (float)payload[9] / 2.0f;
-  out->phase_l1_a = (float)payload[10] / 2.0f;
-  out->phase_l3_a = (float)payload[11] / 2.0f;
+  // Per-phase currents do not exist in this frame — always zero.
+  out->phase_l1_a = 0.0f;
+  out->phase_l2_a = 0.0f;
+  out->phase_l3_a = 0.0f;
 
   return true;
 }

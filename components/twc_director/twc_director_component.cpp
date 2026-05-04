@@ -102,7 +102,7 @@ void TWCDirectorComponent::setup() {
   // Configure core
   twc_core_set_master_address(&this->core_, this->master_address_);
   twc_core_set_online_timeout(&this->core_, 15000);
-  
+
   if (this->global_max_current_a_ > 0.0f) {
     twc_core_set_global_max_current(&this->core_, this->global_max_current_a_);
     ESP_LOGI(TAG, "Global max current (safety limit): %.1fA", this->global_max_current_a_);
@@ -420,16 +420,16 @@ void TWCDirectorComponent::update_master_mode_(uint32_t now) {
   if (!this->master_mode_switch_) return;
 
   bool enabled = this->master_mode_switch_->state;
-  
+
   if (enabled != this->master_mode_last_state_) {
     twc_core_set_master_mode(&this->core_, enabled);
-    
+
     if (enabled) {
       ESP_LOGI(TAG, "Master mode ENABLED (addr=0x%04X)", this->master_address_);
     } else {
       ESP_LOGI(TAG, "Master mode DISABLED");
     }
-    
+
     this->master_mode_last_state_ = enabled;
   }
 }
@@ -441,10 +441,10 @@ void TWCDirectorComponent::update_master_mode_(uint32_t now) {
 void TWCDirectorComponent::update_evse_metrics_(uint32_t now) {
   for (auto &evse : this->evse_entries_) {
     if (!evse.bound) continue;  // Skip unbound slots
-    
+
     // Sync desired current from number entity to core
     this->sync_desired_current_(evse);
-    
+
     // Update all sensors from core state
     this->update_evse_sensors_(evse, now);
   }
@@ -464,7 +464,7 @@ void TWCDirectorComponent::sync_desired_current_(EvseEntry &evse) {
   if (!evse.initial_current || !evse.initial_current->has_state()) return;
 
   float desired = evse.initial_current->state;
-  
+
   // Only update if changed (avoid spam)
   if (evse.last_initial_current_setpoint_a < 0.0f ||
       fabsf(desired - evse.last_initial_current_setpoint_a) > 0.1f) {
@@ -474,13 +474,13 @@ void TWCDirectorComponent::sync_desired_current_(EvseEntry &evse) {
 }
 
 void TWCDirectorComponent::update_evse_sensors_(EvseEntry &evse, uint32_t now) {
-  twc_core_device_t *core_dev = 
+  twc_core_device_t *core_dev =
       twc_core_get_device_by_address(&this->core_, evse.address);
-  
+
   if (!core_dev) return;
-  
+
   const twc_device_t *dev = &core_dev->device;
-  
+
   // Online status
   bool online = twc_core_device_online(&this->core_, core_dev, now);
   this->publish_binary_sensor_if_changed_(evse.online, online);
@@ -519,10 +519,8 @@ void TWCDirectorComponent::update_evse_sensors_(EvseEntry &evse, uint32_t now) {
   this->publish_text_sensor_if_changed_(evse.status_text, status_str);
   evse.last_status_code = status_code;
 
-  // Contactor status (always publish, even if offline)
-  // NOTE: We infer contactor state from delivered current since there's no
-  // reliable way to read the actual contactor status from the TWC protocol.
-  // If delivered current > 0, contactors are closed. If = 0, contactors are open.
+  // Contactor status: infer from actual drawn current (slave heartbeat reportedActual).
+  // session_amps uses twc_device_get_current_available_a() which reads reportedActual.
   float session_amps = this->compute_session_amps_(dev);
   bool contactor_closed = (session_amps > 0.1f);  // 0.1A threshold to avoid noise
   this->publish_binary_sensor_if_changed_(evse.contactor_status, contactor_closed);
@@ -556,9 +554,9 @@ void TWCDirectorComponent::update_evse_sensors_(EvseEntry &evse, uint32_t now) {
     // applied value so it "springs back" if the requested value was scaled down
     // due to global max current constraints
     if (status_code == TWC_HB_SETTING_LIMIT) {
-      twc_core_device_t *core_dev = twc_core_get_device_by_address(&this->core_, evse.address);
-      if (core_dev && core_dev->applied_session_current_a > 0.0f) {
-        float applied = core_dev->applied_session_current_a;
+      twc_core_device_t *core_dev2 = twc_core_get_device_by_address(&this->core_, evse.address);
+      if (core_dev2 && core_dev2->applied_session_current_a > 0.0f) {
+        float applied = core_dev2->applied_session_current_a;
         float current_state = evse.session_current->state;
         // Only update if there's a meaningful difference (avoid float noise)
         if (fabsf(current_state - applied) > 0.1f) {
@@ -585,48 +583,50 @@ void TWCDirectorComponent::update_evse_sensors_(EvseEntry &evse, uint32_t now) {
   }
 
   if (!online) return;  // Don't spam metrics when offline
-  
+
   // Throttle updates
   if (evse.last_metrics_publish_ms != 0 &&
       (now - evse.last_metrics_publish_ms) < METRICS_UPDATE_INTERVAL_MS) {
     return;
   }
   evse.last_metrics_publish_ms = now;
-  
+
   // Identity
-  this->publish_nonempty_(evse.firmware_version, 
+  this->publish_nonempty_(evse.firmware_version,
                          twc_device_get_software_version(dev));
   this->publish_nonempty_(evse.serial_number,
                          twc_device_get_serial_number(dev));
-  
+
   // Vehicle
   bool vehicle_connected = twc_device_get_vehicle_connected(dev);
   this->publish_binary_sensor_if_changed_(evse.vehicle_connected, vehicle_connected);
-  
+
   const char *vin = twc_device_get_vehicle_vin(dev);
   std::string vin_str = vin ? std::string(vin) : std::string();
   this->publish_text_sensor_if_changed_(evse.vehicle_vin, vin_str);
-  
-  // Meter (currents, voltages, energy)
-  this->publish_sensor_(evse.meter_current_phase_a, 
+
+  // Meter: phase currents (TWC Gen2 does not report these; decoder now returns 0.0f)
+  this->publish_sensor_(evse.meter_current_phase_a,
                        twc_device_get_phase_a_current_a(dev));
   this->publish_sensor_(evse.meter_current_phase_b,
                        twc_device_get_phase_b_current_a(dev));
   this->publish_sensor_(evse.meter_current_phase_c,
                        twc_device_get_phase_c_current_a(dev));
-  
+
+  // Meter: phase voltages (correctly parsed from FD EB frame bytes [4-9])
   this->publish_sensor_(evse.meter_voltage_phase_a,
                        twc_device_get_phase_a_voltage_v(dev));
   this->publish_sensor_(evse.meter_voltage_phase_b,
                        twc_device_get_phase_b_voltage_v(dev));
   this->publish_sensor_(evse.meter_voltage_phase_c,
                        twc_device_get_phase_c_voltage_v(dev));
-  
+
+  // Meter: energy
   this->publish_sensor_(evse.meter_energy_total,
                        twc_device_get_total_energy_kwh(dev), 0.001f);
   this->publish_sensor_(evse.meter_energy_session,
                        twc_device_get_session_energy_kwh(dev), 0.001f);
-  
+
   // Current allocation
   float initial_current_a = twc_core_get_current_available_a(core_dev);
   this->publish_sensor_(evse.available_current_sensor, initial_current_a);
@@ -636,12 +636,11 @@ void TWCDirectorComponent::update_evse_sensors_(EvseEntry &evse, uint32_t now) {
 
 float TWCDirectorComponent::compute_session_amps_(const twc_device_t *dev) const {
   if (!dev) return 0.0f;
-  
-  float a = twc_device_get_phase_a_current_a(dev);
-  float b = twc_device_get_phase_b_current_a(dev);
-  float c = twc_device_get_phase_c_current_a(dev);
-  
-  return (a > b) ? ((a > c) ? a : c) : ((b > c) ? b : c);
+  // TWC Gen2 does not report per-phase current measurements in the FD EB frame.
+  // The only real current data is reportedActual from the FD E0 slave heartbeat,
+  // exposed via twc_device_get_current_available_a(). This returns the actual
+  // amps the car is drawing as reported by the TWC in each slave heartbeat.
+  return twc_device_get_current_available_a(dev);
 }
 
 // =============================================================================
@@ -819,7 +818,7 @@ void TWCDirectorComponent::format_hex_(const uint8_t *data, size_t len,
     out[0] = '\0';
     return;
   }
-  
+
   size_t pos = 0;
   for (size_t i = 0; i < len && pos + 4 < out_size; i++) {
     int n = snprintf(&out[pos], out_size - pos,
