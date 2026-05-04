@@ -306,7 +306,7 @@ bool twc_core_handle_frame(twc_core_t *core,
       // with FD E2 (re-linkready) instead of FD E0 (slave heartbeat).
       if (is_new_peripheral) {
         uint8_t lr2_frame[16];
-        size_t lr2_len = twc_build_controller_linkready2_frame(
+        size_t lr2_len = twc_build_peripheral_pause_frame(
             core->master_address,
             core->master_session_id,
             lr2_frame, sizeof(lr2_frame)
