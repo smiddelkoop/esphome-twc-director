@@ -50,9 +50,10 @@
 #define TWC_POST_HEARTBEAT_DELAY_MS 500U
 #endif
 
-// Interval between startup burst frames (milliseconds)
+// Interval between startup burst frames (milliseconds).
+// Matched to jnicolson/esphome-twc-controller reference: 1000ms.
 #ifndef TWC_STARTUP_BURST_INTERVAL_MS
-#define TWC_STARTUP_BURST_INTERVAL_MS 200U
+#define TWC_STARTUP_BURST_INTERVAL_MS 1000U
 #endif
 
 // Number of E1 frames to send during startup burst
@@ -60,9 +61,10 @@
 #define TWC_STARTUP_BURST_E1_COUNT 5U
 #endif
 
-// Number of E2 frames to send during startup burst
+// Number of E2 frames to send during startup burst.
+// Matched to jnicolson/esphome-twc-controller reference: 5.
 #ifndef TWC_STARTUP_BURST_E2_COUNT
-#define TWC_STARTUP_BURST_E2_COUNT 4U
+#define TWC_STARTUP_BURST_E2_COUNT 5U
 #endif
 
 // Maximum current per device (amps) - safety clamp
@@ -72,8 +74,8 @@
 
 // How long to delay the startup burst after master mode is enabled (ms).
 // This gives the ESPHome API logger time to connect so the E1/E2 frames
-// are visible in the log stream.  Set to 0 to disable the delay.
-// The ESP32 API handshake typically takes 11+ seconds; 15 s is a safe margin.
+// are visible in the log stream.  The API handshake typically takes 11+ seconds; 15 s
+// gives a safe margin.  Set to 0 in twc_core.h to disable.
 #ifndef TWC_STARTUP_LOG_DELAY_MS
 #define TWC_STARTUP_LOG_DELAY_MS 15000U
 #endif
@@ -195,7 +197,7 @@ struct twc_core {
   bool master_just_enabled;
   uint8_t master_session_id;
 
-  // Startup burst (5x E1 + 4x E2)
+  // Startup burst (5x E1 + 5x E2)
   bool startup_burst_active;
   uint8_t startup_burst_e1_sent;
   uint8_t startup_burst_e2_sent;

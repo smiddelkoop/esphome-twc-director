@@ -189,8 +189,20 @@ size_t twc_build_controller_negotiation_payload(uint8_t session_id,
     return 0;
   }
 
+  // Payload layout matches the TWC Gen2 linkready (presence) frame format:
+  //   byte 0:    sign / session_id
+  //   bytes 1-2: max_allowable_current in centiamps, big-endian
+  //              0x0C80 = 3200 cA = 32 A
+  //              The TWC peripheral requires a non-zero value here to
+  //              accept the master as valid and complete the handshake.
+  //              Sending 0x0000 causes the TWC to ignore the master and
+  //              keep broadcasting FD E2 indefinitely.
+  //              Reference: jnicolson/esphome-twc-controller hardcodes 0x0C80.
+  //   bytes 3-10: padding zeros
   out_payload[0] = session_id;
-  memset(out_payload + 1, 0x00, 10);
+  out_payload[1] = 0x0Cu;  // max_allowable_current high byte
+  out_payload[2] = 0x80u;  // max_allowable_current low byte: 3200 cA = 32A
+  memset(out_payload + 3, 0x00, 8);
 
   return required;
 }
