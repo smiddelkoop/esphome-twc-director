@@ -70,6 +70,14 @@
 #define TWC_MAX_DEVICE_CURRENT_A 32.0f
 #endif
 
+// How long to delay the startup burst after master mode is enabled (ms).
+// This gives the ESPHome API logger time to connect so the E1/E2 frames
+// are visible in the log stream.  Set to 0 to disable the delay.
+// The ESP32 API handshake typically takes 11+ seconds; 15 s is a safe margin.
+#ifndef TWC_STARTUP_LOG_DELAY_MS
+#define TWC_STARTUP_LOG_DELAY_MS 15000U
+#endif
+
 // =============================================================================
 // TYPES
 // =============================================================================
@@ -192,6 +200,11 @@ struct twc_core {
   uint8_t startup_burst_e1_sent;
   uint8_t startup_burst_e2_sent;
   uint32_t startup_burst_last_ms;
+
+  // Startup log delay: holds off TX until the API logger has connected.
+  // Set to (now_ms + TWC_STARTUP_LOG_DELAY_MS) when master mode is first
+  // enabled.  Cleared to 0 once the deadline passes.
+  uint32_t startup_log_delay_end_ms;
 };
 
 // =============================================================================

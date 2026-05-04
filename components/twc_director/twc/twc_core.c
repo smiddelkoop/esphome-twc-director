@@ -783,6 +783,36 @@ void twc_core_master_tick(twc_core_t *core, uint32_t now_ms) {
     if (core->master_session_id == 0u) {
       core->master_session_id = 1u;
     }
+
+    // Hold off all TX for TWC_STARTUP_LOG_DELAY_MS so the ESPHome API
+    // logger has time to connect and the E1/E2 burst is visible in the
+    // log stream.  The API handshake typically takes 11+ seconds; 15 s
+    // gives a safe margin.  Set to 0 in twc_core.h to disable.
+    if (TWC_STARTUP_LOG_DELAY_MS > 0u) {
+      core->startup_log_delay_end_ms = now_ms + TWC_STARTUP_LOG_DELAY_MS;
+      if (core->log_cb) {
+        char msg[96];
+        snprintf(msg, sizeof(msg),
+                 "DIAG startup: holding TX for %u ms so logger can connect",
+                 (unsigned)TWC_STARTUP_LOG_DELAY_MS);
+        core->log_cb(TWC_LOG_DEBUG, msg, core->log_user);
+      }
+    }
+  }
+
+  // Startup log delay gate: block all TX until the deadline passes.
+  // Once it has passed this branch is a no-op (deadline cleared to 0).
+  if (core->startup_log_delay_end_ms != 0u) {
+    if (now_ms < core->startup_log_delay_end_ms) {
+      return;  // Still waiting
+    }
+    // Deadline just passed on this tick – log once and clear
+    if (core->log_cb) {
+      core->log_cb(TWC_LOG_DEBUG,
+                   "DIAG startup: log delay done, sending E1/E2 burst now",
+                   core->log_user);
+    }
+    core->startup_log_delay_end_ms = 0u;
   }
 
   // Priority 1: Startup burst
