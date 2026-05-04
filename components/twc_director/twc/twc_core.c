@@ -300,13 +300,29 @@ bool twc_core_handle_frame(twc_core_t *core,
                         new_mode == TWC_MODE_UNKNOWN);
 
     if (needs_claim) {
+      // On first discovery, send Linkready2 (FB E2) twice before the claim.
+      // The slave ignores the first FB E2 but registers the master on the
+      // second. Without this, the TWC responds to every FB E0 heartbeat
+      // with FD E2 (re-linkready) instead of FD E0 (slave heartbeat).
+      if (is_new_peripheral) {
+        uint8_t lr2_frame[16];
+        size_t lr2_len = twc_build_controller_linkready2_frame(
+            core->master_address,
+            core->master_session_id,
+            lr2_frame, sizeof(lr2_frame)
+        );
+        if (lr2_len > 0) {
+          core->tx_cb(lr2_frame, lr2_len, core->tx_user);
+          core->tx_cb(lr2_frame, lr2_len, core->tx_user);
+        }
+      }
+
       uint8_t claim_frame[16];
       size_t claim_len = twc_build_heartbeat_frame(
           core->master_address, dev->address,
           (uint8_t)TWC_HB_READY, 0u, 0u,
           claim_frame, sizeof(claim_frame)
       );
-
       if (claim_len > 0) {
         core->tx_cb(claim_frame, claim_len, core->tx_user);
       }
