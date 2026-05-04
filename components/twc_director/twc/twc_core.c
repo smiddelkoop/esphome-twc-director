@@ -288,10 +288,7 @@ bool twc_core_handle_frame(twc_core_t *core,
     }
   }
 
-  // MASTER MODE: Immediate claim response to unconfigured peripheral E2.
-  // Send state=0x00 (TWC_HB_READY) as the direct response to the TWC's
-  // presence announcement. This establishes the master-slave link.
-  // The current offer (0x05) follows after TWC_MIN_CLAIM_HB_COUNT heartbeats.
+  // MASTER MODE: Auto-respond to unconfigured peripherals
   if (core->master_mode && core->tx_cb &&
       marker == TWC_MARKER_RESPONSE &&
       cmd == TWC_CMD_PERIPHERAL_NEGOTIATION) {
@@ -300,29 +297,13 @@ bool twc_core_handle_frame(twc_core_t *core,
                         new_mode == TWC_MODE_UNKNOWN);
 
     if (needs_claim) {
-      // On first discovery, send Linkready2 (FB E2) twice before the claim.
-      // The slave ignores the first FB E2 but registers the master on the
-      // second. Without this, the TWC responds to every FB E0 heartbeat
-      // with FD E2 (re-linkready) instead of FD E0 (slave heartbeat).
-      if (is_new_peripheral) {
-        uint8_t lr2_frame[16];
-        size_t lr2_len = twc_build_peripheral_pause_frame(
-            core->master_address,
-            core->master_session_id,
-            lr2_frame, sizeof(lr2_frame)
-        );
-        if (lr2_len > 0) {
-          core->tx_cb(lr2_frame, lr2_len, core->tx_user);
-          core->tx_cb(lr2_frame, lr2_len, core->tx_user);
-        }
-      }
-
       uint8_t claim_frame[16];
       size_t claim_len = twc_build_heartbeat_frame(
           core->master_address, dev->address,
-          (uint8_t)TWC_HB_READY, 0u, 0u,
+          TWC_HB_READY, 0, 0,
           claim_frame, sizeof(claim_frame)
       );
+
       if (claim_len > 0) {
         core->tx_cb(claim_frame, claim_len, core->tx_user);
       }
@@ -352,11 +333,7 @@ static bool handle_startup_burst(twc_core_t *core, uint32_t now_ms) {
   uint8_t frame[16];
   size_t frame_len = 0;
 
-  // Send E1 (CONTROLLER_NEGOTIATION) frames to claim master role.
-  // NOTE: E2 (PERIPHERAL_PAUSE) frames are deliberately omitted.
-  // Sending PERIPHERAL_PAUSE before any peripheral has been discovered
-  // silences the TWC (it stops sending E2 presence announcements), which
-  // prevents discovery and creates a permanent boot-time deadlock.
+  // Send E1 frames, then E2 frames
   if (core->startup_burst_e1_sent < TWC_STARTUP_BURST_E1_COUNT) {
     frame_len = twc_build_controller_negotiation_frame(
         core->master_address,
@@ -369,9 +346,21 @@ static bool handle_startup_burst(twc_core_t *core, uint32_t now_ms) {
       core->startup_burst_last_ms = now_ms;
       return true;
     }
+  } else if (core->startup_burst_e2_sent < TWC_STARTUP_BURST_E2_COUNT) {
+    frame_len = twc_build_peripheral_pause_frame(
+        core->master_address,
+        core->master_session_id,
+        frame, sizeof(frame)
+    );
+    if (frame_len > 0) {
+      core->tx_cb(frame, frame_len, core->tx_user);
+      core->startup_burst_e2_sent++;
+      core->startup_burst_last_ms = now_ms;
+      return true;
+    }
   }
 
-  // Burst complete (E2/PERIPHERAL_PAUSE skipped intentionally)
+  // Burst complete
   core->startup_burst_active = false;
   return false;
 }
@@ -434,18 +423,6 @@ static void reconcile_current_allocation(twc_core_t *core) {
     if (changed || car_just_connected) {
       dev->pending_initial_current_cmd = true;
       dev->last_initial_current_cmd_a = applied;
-
-      // DIAGNOSTIC: log whenever pending_initial_current_cmd is set
-      if (core->log_cb) {
-        char msg[128];
-        snprintf(msg, sizeof(msg),
-                 "DIAG reconcile 0x%04X: desired=%.1f applied=%.1f changed=%d"
-                 " car=%d -> pending_initial=true cmd_a=%.1f",
-                 dev->address, dev->desired_initial_current_a,
-                 applied, changed ? 1 : 0, car_just_connected ? 1 : 0,
-                 dev->last_initial_current_cmd_a);
-        core->log_cb(TWC_LOG_WARNING, msg, core->log_user);
-      }
     }
 
     // Notify application
@@ -641,14 +618,6 @@ static bool send_info_probe(twc_core_t *core, uint32_t now_ms) {
   return false;
 }
 
-// Minimum number of state=0x00 (claim) heartbeats to send before escalating
-// to state=0x05 (current offer) for UNCONF_PERIPHERAL devices.
-// This ensures the master-slave link is established regardless of whether
-// the TWC was already seen on the bus during the boot window (which sets
-// last_frame_ms immediately, making that check unreliable as a gate).
-// At 1 heartbeat/second, 5 heartbeats = 5 seconds of 0x00 claims.
-#define TWC_MIN_CLAIM_HB_COUNT 5u
-
 static bool send_heartbeat(twc_core_t *core, uint32_t now_ms) {
   if (core->last_e0_heartbeat_ms != 0u) {
     uint32_t elapsed = (now_ms >= core->last_e0_heartbeat_ms)
@@ -675,55 +644,40 @@ static bool send_heartbeat(twc_core_t *core, uint32_t now_ms) {
       continue;
     }
 
-    // DIAGNOSTIC: log state at every heartbeat decision point
-    if (core->log_cb) {
-      char msg[192];
-      snprintf(msg, sizeof(msg),
-               "DIAG heartbeat 0x%04X: mode=%d desired=%.1f applied=%.1f"
-               " pending_init=%d pending_sess=%d cmd_a=%.1f global_max=%.1f e0cnt=%u",
-               dev->address, (int)mode,
-               dev->desired_initial_current_a,
-               dev->applied_initial_current_a,
-               dev->pending_initial_current_cmd ? 1 : 0,
-               dev->pending_session_current_cmd ? 1 : 0,
-               dev->last_initial_current_cmd_a,
-               core->global_max_current_a,
-               (unsigned)dev->e0_since_last_probe);
-      core->log_cb(TWC_LOG_WARNING, msg, core->log_user);
-    }
-
     // Determine charge state and currents
     uint8_t charge_state = 0u;
     uint16_t available_centiamps = 0u;
     uint16_t delivered_centiamps = 0u;
 
-    float dev_max = get_device_max_current(dev);
-
     if (mode == TWC_MODE_UNCONF_PERIPHERAL) {
-      // TWC Gen 2 requires a minimum number of state=0x00 (claim) heartbeats
-      // before it will accept a state=0x05 (current offer). The claim phase
-      // establishes the master-slave link. Sending 0x05 too early — before
-      // enough 0x00 frames have been sent — causes the TWC to ignore the offer.
-      //
-      // Gate on e0_since_last_probe (counts heartbeats sent to this device since
-      // boot or last reset). This is boot-window-safe: even if last_frame_ms was
-      // set during the 11-second API connection delay, e0_since_last_probe starts
-      // at 0 and reliably tracks how many 0x00 claims have been issued.
-      if (dev->pending_initial_current_cmd &&
-          dev->e0_since_last_probe >= TWC_MIN_CLAIM_HB_COUNT) {
+      // Offer the configured current via 0x05 so the TWC knows what current
+      // it will receive once the configuration handshake completes.
+      // Without this, the TWC stays idle waiting for a current offer that
+      // never arrives while it is still in unconfigured mode.
+      float dev_max = get_device_max_current(dev);
+      if (dev->pending_initial_current_cmd) {
         float current_a = dev->last_initial_current_cmd_a;
         if (current_a < 0.0f) current_a = 0.0f;
         if (current_a > dev_max) current_a = dev_max;
         charge_state = 0x05u;
         available_centiamps = (uint16_t)(current_a * 100.0f + 0.5f);
         delivered_centiamps = 0u;
+        if (core->log_cb) {
+          char diag[128];
+          snprintf(diag, sizeof(diag),
+                   "DIAG UNCONF_PERIPHERAL 0x%04X: 0x05 offer %u cA (%.1fA)",
+                   dev->address, available_centiamps, current_a);
+          core->log_cb(TWC_LOG_DEBUG, diag, core->log_user);
+        }
       } else {
-        // Claim phase: send state=0x00 to establish master-slave link
+        // No offer pending – send claim heartbeat with zeros
         charge_state = 0u;
         available_centiamps = 0u;
         delivered_centiamps = 0u;
       }
     } else {
+      float dev_max = get_device_max_current(dev);
+
       // Prioritize 0x09 session current over 0x05 initial current
       if (dev->pending_session_current_cmd) {
         float current_a = dev->last_session_current_cmd_a;
@@ -783,12 +737,18 @@ static bool send_heartbeat(twc_core_t *core, uint32_t now_ms) {
     core->last_e0_heartbeat_ms = now_ms;
 
     // Clear pending flags after successful send.
-    // Exception: for UNCONF_PERIPHERAL, keep pending_initial_current_cmd set
-    // so the 0x05 offer is resent every heartbeat until the TWC transitions
-    // to PERIPHERAL mode. The TWC requires repeated offers.
+    // Exception: for UNCONF_PERIPHERAL devices, keep pending_initial_current_cmd
+    // set so the 0x05 current offer is repeated every heartbeat until the TWC
+    // completes configuration and transitions to PERIPHERAL mode.
     if (charge_state == 0x05u) {
       if (mode != TWC_MODE_UNCONF_PERIPHERAL) {
         dev->pending_initial_current_cmd = false;
+      } else if (core->log_cb) {
+        char diag[128];
+        snprintf(diag, sizeof(diag),
+                 "DIAG UNCONF_PERIPHERAL 0x%04X: retaining pending_initial_current_cmd",
+                 dev->address);
+        core->log_cb(TWC_LOG_DEBUG, diag, core->log_user);
       }
     } else if (charge_state == 0x09u) {
       dev->pending_session_current_cmd = false;
