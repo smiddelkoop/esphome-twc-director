@@ -820,6 +820,14 @@ void twc_core_master_tick(twc_core_t *core, uint32_t now_ms) {
     return;
   }
 
+  // While the burst is still active but waiting for its inter-frame interval,
+  // do NOT fall through to heartbeats or current allocation.  Injecting any
+  // other frame type between E1/E2 burst frames confuses the TWC and prevents
+  // it from completing the master-slave handshake.
+  if (core->startup_burst_active) {
+    return;
+  }
+
   // Priority 2: Current allocation
   reconcile_current_allocation(core);
 
