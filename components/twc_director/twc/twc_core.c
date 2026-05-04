@@ -650,31 +650,28 @@ static bool send_heartbeat(twc_core_t *core, uint32_t now_ms) {
     uint16_t delivered_centiamps = 0u;
 
     if (mode == TWC_MODE_UNCONF_PERIPHERAL) {
-      // Offer the configured current via 0x05 so the TWC knows what current
-      // it will receive once the configuration handshake completes.
-      // Without this, the TWC stays idle waiting for a current offer that
-      // never arrives while it is still in unconfigured mode.
-      float dev_max = get_device_max_current(dev);
-      if (dev->pending_initial_current_cmd) {
-        float current_a = dev->last_initial_current_cmd_a;
-        if (current_a < 0.0f) current_a = 0.0f;
-        if (current_a > dev_max) current_a = dev_max;
-        charge_state = 0x05u;
-        available_centiamps = (uint16_t)(current_a * 100.0f + 0.5f);
-        delivered_centiamps = 0u;
-        if (core->log_cb) {
-          char diag[128];
-          snprintf(diag, sizeof(diag),
-                   "DIAG UNCONF_PERIPHERAL 0x%04X: 0x05 offer %u cA (%.1fA)",
-                   dev->address, available_centiamps, current_a);
-          core->log_cb(TWC_LOG_DEBUG, diag, core->log_user);
-        }
-      } else {
-        // No offer pending – send claim heartbeat with zeros
-        charge_state = 0u;
-        available_centiamps = 0u;
-        delivered_centiamps = 0u;
+      // Send state=0x00 (ready/claim) during the master-slave handshake.
+      // The TWC requires sustained 0x00 heartbeats to complete link
+      // establishment and transition from FD E2 (slave linkready) to
+      // FD E0 (slave heartbeat).
+      //
+      // Sending state=0x05 (current offer) during this phase prevents the
+      // transition — the TWC keeps re-broadcasting FD E2 instead.
+      // Once the TWC transitions to PERIPHERAL mode the normal 0x05 path
+      // below will deliver the current offer.
+      //
+      // Reference: jnicolson/esphome-twc-controller sends only 0x00
+      // heartbeats and never sends 0x05 until current_changed_ fires.
+      if (core->log_cb) {
+        char diag[128];
+        snprintf(diag, sizeof(diag),
+                 "DIAG UNCONF_PERIPHERAL 0x%04X: claim 0x00 (awaiting FD E0)",
+                 dev->address);
+        core->log_cb(TWC_LOG_DEBUG, diag, core->log_user);
       }
+      charge_state = 0u;
+      available_centiamps = 0u;
+      delivered_centiamps = 0u;
     } else {
       float dev_max = get_device_max_current(dev);
 
@@ -736,20 +733,9 @@ static bool send_heartbeat(twc_core_t *core, uint32_t now_ms) {
     core->tx_cb(frame, frame_len, core->tx_user);
     core->last_e0_heartbeat_ms = now_ms;
 
-    // Clear pending flags after successful send.
-    // Exception: for UNCONF_PERIPHERAL devices, keep pending_initial_current_cmd
-    // set so the 0x05 current offer is repeated every heartbeat until the TWC
-    // completes configuration and transitions to PERIPHERAL mode.
+    // Clear pending flags after successful send
     if (charge_state == 0x05u) {
-      if (mode != TWC_MODE_UNCONF_PERIPHERAL) {
-        dev->pending_initial_current_cmd = false;
-      } else if (core->log_cb) {
-        char diag[128];
-        snprintf(diag, sizeof(diag),
-                 "DIAG UNCONF_PERIPHERAL 0x%04X: retaining pending_initial_current_cmd",
-                 dev->address);
-        core->log_cb(TWC_LOG_DEBUG, diag, core->log_user);
-      }
+      dev->pending_initial_current_cmd = false;
     } else if (charge_state == 0x09u) {
       dev->pending_session_current_cmd = false;
     } else if (charge_state == 0x06u) {
