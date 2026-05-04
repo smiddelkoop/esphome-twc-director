@@ -115,6 +115,12 @@ void TWCDirectorComponent::setup() {
 
   ESP_LOGI(TAG, "EVSE max current limit: %.1fA", this->evse_max_current_limit_a_);
 
+  if (this->flow_control_pin_) {
+    // Start in receive mode: logical true -> for inverted output -> physical LOW -> DE disabled
+    this->flow_control_pin_->set_state(true);
+    ESP_LOGI(TAG, "Flow control (DE) pin configured");
+  }
+
   // Wire callbacks
   twc_core_set_tx_callback(&this->core_, &tx_callback_shim, this);
   twc_core_set_negotiation_callback(&this->core_, &negotiation_callback_shim, this);
@@ -323,8 +329,27 @@ void TWCDirectorComponent::drain_tx_queue_(uint32_t now) {
   PendingTx pending = this->tx_queue_.front();
   this->tx_queue_.erase(this->tx_queue_.begin());
 
+  // Assert flow control: enable the RS-485 driver (transmit mode).
+  // For a combined DE+/RE pin wired as an inverted output:
+  //   set_state(false) = logical LOW = inverted -> physical HIGH -> DE enabled.
+  // This mirrors jnicolson's flow_control_pin->digital_write(true) before TX.
+  if (this->flow_control_pin_) {
+    this->flow_control_pin_->set_state(false);
+  }
+
   for (size_t i = 0; i < pending.len; ++i) {
     this->write(pending.buf[i]);
+  }
+
+  // Wait for the UART hardware FIFO to drain before releasing DE.
+  // Without this, DE is released before the last bytes leave the wire.
+  this->flush();
+
+  // Release flow control: back to receive mode.
+  // set_state(true) = logical HIGH = inverted -> physical LOW -> DE disabled, /RE low = RX enabled.
+  // Mirrors jnicolson's flow_control_pin->digital_write(false) after flush().
+  if (this->flow_control_pin_) {
+    this->flow_control_pin_->set_state(true);
   }
 
   this->next_tx_at_ms_ = now + TX_INTERFRAME_GAP_MS;
