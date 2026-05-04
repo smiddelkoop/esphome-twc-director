@@ -8,6 +8,7 @@
 #include "esphome/components/uart/uart.h"
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/number/number.h"
+#include "esphome/components/output/binary_output.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/switch/switch.h"
 #include "esphome/components/text_sensor/text_sensor.h"
@@ -203,6 +204,16 @@ class TWCDirectorComponent : public Component, public uart::UARTDevice {
     this->evse_max_current_limit_a_ = max_current_a;
   }
 
+  // Optional RS-485 flow control (DE) output pin.
+  // When set, drain_tx_queue_ will assert this pin (set_state false -> physical
+  // HIGH for inverted outputs) before writing each frame and release it
+  // (set_state true -> physical LOW) after flush() confirms TX is complete.
+  // This mirrors jnicolson's flow_control_pin behaviour and is required for
+  // transceivers such as the MAX13487E where DE+/RE share a single GPIO.
+  void set_flow_control_pin(output::BinaryOutput *pin) {
+    this->flow_control_pin_ = pin;
+  }
+
   // Optional global max current control number entity for runtime adjustment
   void set_global_max_current_control(number::Number *num) {
     this->global_max_current_control_ = num;
@@ -296,7 +307,7 @@ class TWCDirectorComponent : public Component, public uart::UARTDevice {
     // Track last contactor switch state we published to avoid redundant updates
     bool last_contactor_switch_state{false};
 
-    // Track previous session amps to detect 0 → >0 transition for syncing session current number
+    // Track previous session amps to detect 0 -> >0 transition for syncing session current number
     float last_session_amps{0.0f};
   };
 
@@ -323,6 +334,10 @@ class TWCDirectorComponent : public Component, public uart::UARTDevice {
   TWCDirectorMasterModeSwitch *master_mode_switch_{nullptr};
   binary_sensor::BinarySensor *link_ok_sensor_{nullptr};
   sensor::Sensor *charging_count_sensor_{nullptr};
+
+  // Optional RS-485 direction control output (DE pin).
+  // Null when not configured (for boards with auto-direction transceivers).
+  output::BinaryOutput *flow_control_pin_{nullptr};
 
   bool master_mode_last_state_{false};
 

@@ -3,7 +3,7 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 
-from esphome.components import uart, switch, binary_sensor, text_sensor, sensor, number, button
+from esphome.components import uart, switch, binary_sensor, text_sensor, sensor, number, button, output
 from esphome.const import (
     CONF_ID,
     CONF_UART_ID,
@@ -51,6 +51,7 @@ CONF_GLOBAL_MAX_CURRENT_CONTROL = "global_max_current_control"
 CONF_EVSE_MAX_CURRENT_LIMIT = "global_twc_max_current"
 CONF_LINK_OK = "link_ok"
 CONF_CHARGING_COUNT = "charging_count"
+CONF_FLOW_CONTROL_PIN = "flow_control_pin"
 
 CONF_EVSE = "evse"
 CONF_ADDRESS = "address"
@@ -159,6 +160,18 @@ CONFIG_SCHEMA = (
 
             # UART this director will use to talk to the TWC bus
             cv.GenerateID(CONF_UART_ID): cv.use_id(uart.UARTComponent),
+
+            # Optional RS-485 direction control (DE) output pin.
+            # When configured, this output is set to OFF (logical false) before
+            # each transmission (enabling the RS-485 driver) and back to ON
+            # (logical true) after the bytes have been sent (re-enabling the
+            # receiver).  Required for transceivers without auto-direction
+            # control such as the MAX13487E / SN65HVD485 family where DE and
+            # /RE are tied to a single GPIO.
+            # Configure the corresponding output with inverted: true so that
+            # the ESPHome logical ON state corresponds to receive mode
+            # (physical LOW on the IC pin) matching the on_boot state.
+            cv.Optional(CONF_FLOW_CONTROL_PIN): cv.use_id(output.BinaryOutput),
 
             # Optional switch that controls "master mode" vs passive/observer mode
             cv.Optional(CONF_MASTER_MODE): cv.All(
@@ -366,6 +379,14 @@ async def to_code(config):
     if CONF_EVSE_MAX_CURRENT_LIMIT in config:
         evse_max = config[CONF_EVSE_MAX_CURRENT_LIMIT]
         cg.add(var.set_evse_max_current_limit(evse_max))
+
+    # Optional RS-485 flow control (DE) pin: set_state(false) before TX,
+    # set_state(true) after TX.  For a combined DE+/RE pin configured with
+    # inverted:true in the output entity, logical false -> physical HIGH ->
+    # driver enabled, and logical true -> physical LOW -> receiver enabled.
+    if CONF_FLOW_CONTROL_PIN in config:
+        flow_pin = await cg.get_variable(config[CONF_FLOW_CONTROL_PIN])
+        cg.add(var.set_flow_control_pin(flow_pin))
 
     # Register as a regular ESPHome component so loop()/setup() are called
     await cg.register_component(var, config)
