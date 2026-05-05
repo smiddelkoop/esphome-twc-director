@@ -101,6 +101,17 @@ void TWCDirectorComponent::loop() {
 
   this->process_rx_(now);
   this->update_master_mode_(now);
+
+  // Sync desired currents from number entities BEFORE master tick so that
+  // reconcile_current_allocation() inside twc_core_master_tick() sees the
+  // correct values on the very first tick after boot restore.  Without this
+  // pre-sync there is a one-loop-cycle delay: the number entity restores its
+  // value, sync runs AFTER master_tick, and the first status transition log
+  // captures applied_initial_current_a = 0 instead of the real value.
+  for (auto &evse : this->evse_entries_) {
+    if (evse.bound) this->sync_desired_current_(evse);
+  }
+
   this->run_master_tick_(now);
   this->update_evse_metrics_(now);
   this->drain_tx_queue_(now);
@@ -327,9 +338,10 @@ void TWCDirectorComponent::update_master_mode_(uint32_t now) {
 // =============================================================================
 
 void TWCDirectorComponent::update_evse_metrics_(uint32_t now) {
+  // Note: sync_desired_current_() is called in loop() BEFORE run_master_tick_()
+  // so reconcile_current_allocation() always sees the current setpoints.
   for (auto &evse : this->evse_entries_) {
     if (!evse.bound) continue;
-    this->sync_desired_current_(evse);
     this->update_evse_sensors_(evse, now);
   }
 
@@ -655,6 +667,19 @@ void TWCDirectorEnableSwitch::write_state(bool state) {
 }
 
 void TWCDirectorCurrentNumber::control(float value) {
+  // Clamp to this entity's declared min/max BEFORE passing to the parent or
+  // publishing to HA.  On boot, ESPHome calls control() with the previously
+  // saved NVS value.  If a higher limit was in effect when it was saved (e.g.
+  // 32A stored under old firmware, now re-flashed with a 16A max entity), the
+  // raw value must be clamped here so that:
+  //   1. The HA entity displays the correct safe value (not the stale 32A).
+  //   2. The core receives the clamped value and never offers more than the
+  //      configured maximum to the TWC.
+  float min_v = this->traits.get_min_value();
+  float max_v = this->traits.get_max_value();
+  if (value < min_v) value = min_v;
+  if (value > max_v) value = max_v;
+
   const char *type_str = (this->type_ == TYPE_MAX) ? "max" :
                          (this->type_ == TYPE_SESSION) ? "session" :
                          (this->type_ == TYPE_GLOBAL_MAX) ? "global_max" : "initial";
