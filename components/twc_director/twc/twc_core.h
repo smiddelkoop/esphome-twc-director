@@ -67,9 +67,11 @@
 #define TWC_STARTUP_BURST_E2_COUNT 5U
 #endif
 
-// Maximum current per device (amps) - safety clamp
+// Maximum current per device (amps) - safety clamp.
+// Default 16A matches a standard EU single-phase 16A circuit breaker.
+// Override with -DTWC_MAX_DEVICE_CURRENT_A=32.0f for 32A installs.
 #ifndef TWC_MAX_DEVICE_CURRENT_A
-#define TWC_MAX_DEVICE_CURRENT_A 32.0f
+#define TWC_MAX_DEVICE_CURRENT_A 16.0f
 #endif
 
 // How long to delay the startup burst after master mode is enabled (ms).
@@ -127,7 +129,7 @@ struct twc_core_device {
   uint16_t address;
   bool present;
   bool enabled;  // When false, master mode will not communicate with this device
-  
+
   // Activity timestamps
   uint32_t last_frame_ms;         // Any frame from this device
   uint32_t last_status_ms;        // Last E0/E1/E2 (strong presence)
@@ -322,24 +324,18 @@ uint32_t twc_core_get_restart_counter(const twc_core_device_t *dev);
 // =============================================================================
 
 // Queue an increase current command (0x06) for the specified device.
-// The command will be sent in the next heartbeat cycle.
 void twc_core_send_increase_current(twc_core_t *core, uint16_t address);
 
 // Queue a decrease current command (0x07) for the specified device.
-// The command will be sent in the next heartbeat cycle.
 void twc_core_send_decrease_current(twc_core_t *core, uint16_t address);
 
 // =============================================================================
 // DEVICE ENABLE/DISABLE (master mode only)
 // =============================================================================
 
-// Enable or disable a device for master mode communication.
-// When disabled, the master will not send heartbeats or current allocations
-// to this device, effectively stopping charging.
 void twc_core_set_device_enabled(twc_core_t *core,
                                   uint16_t address,
                                   bool enabled);
 
-// Check if a device is enabled for master mode communication.
 bool twc_core_get_device_enabled(const twc_core_t *core,
                                   uint16_t address);

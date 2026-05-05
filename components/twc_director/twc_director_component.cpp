@@ -2,10 +2,9 @@
 //
 // ESPHome glue layer for TWC control via twc_core.
 //
-// Responsibilities:
-//   RX: UART → SLIP decode → twc_core_handle_frame() → update ESPHome sensors
-//   TX: twc_core_master_tick() → callback → SLIP encode → UART
-//   Binding: Auto-bind discovered devices to EVSE slots
+// RX: UART -> SLIP decode -> twc_core_handle_frame() -> update ESPHome sensors
+// TX: twc_core_master_tick() -> callback -> SLIP encode -> UART
+// Binding: Auto-bind discovered devices to EVSE slots
 
 #include "twc_director_component.h"
 #include "esphome/core/log.h"
@@ -23,68 +22,38 @@ namespace twc_director {
 static const char *const TAG = "twc";
 
 // =============================================================================
-// CALLBACK SHIMS (C → C++)
+// CALLBACK SHIMS (C -> C++)
 // =============================================================================
 
-// TX callback: core wants to send a frame
 void tx_callback_shim(const uint8_t *frame, size_t len, void *user_data) {
   auto *self = static_cast<TWCDirectorComponent *>(user_data);
-  if (self) {
-    self->handle_tx_frame_(frame, len);
-  }
+  if (self) self->handle_tx_frame_(frame, len);
 }
 
-// Negotiation callback: core updated current allocation
-void negotiation_callback_shim(uint16_t address,
-                                float applied_initial_current_a,
-                                uint8_t session_id,
-                                void *user_data) {
+void negotiation_callback_shim(uint16_t address, float applied_initial_current_a,
+                                uint8_t session_id, void *user_data) {
   auto *self = static_cast<TWCDirectorComponent *>(user_data);
   if (self) {
-    ESP_LOGI(TAG,
-             "Negotiation update TWC 0x%04X: session=%u applied=%.1fA",
+    ESP_LOGI(TAG, "Negotiation update TWC 0x%04X: session=%u applied=%.1fA",
              address, session_id, applied_initial_current_a);
   }
 }
 
-// Auto-bind callback: core discovered a new peripheral
-void autobind_callback_shim(uint16_t address,
-                             twc_mode_t mode,
-                             void *user_data) {
+void autobind_callback_shim(uint16_t address, twc_mode_t mode, void *user_data) {
   auto *self = static_cast<TWCDirectorComponent *>(user_data);
-  if (self) {
-    self->handle_auto_bind_(address, mode);
-  }
+  if (self) self->handle_auto_bind_(address, mode);
 }
 
-// Log callback: core wants to log diagnostic information
-void log_callback_shim(twc_log_level_t level,
-                       const char *message,
-                       void *user_data) {
-  (void)user_data;  // Not needed for logging
-
+void log_callback_shim(twc_log_level_t level, const char *message, void *user_data) {
+  (void)user_data;
   if (!message) return;
-
-  // Map TWC log levels to ESPHome log levels
   switch (level) {
-    case TWC_LOG_ERROR:
-      ESP_LOGE(TAG, "%s", message);
-      break;
-    case TWC_LOG_WARNING:
-      ESP_LOGW(TAG, "%s", message);
-      break;
-    case TWC_LOG_INFO:
-      ESP_LOGI(TAG, "%s", message);
-      break;
-    case TWC_LOG_DEBUG:
-      ESP_LOGD(TAG, "%s", message);
-      break;
-    case TWC_LOG_VERBOSE:
-      ESP_LOGV(TAG, "%s", message);
-      break;
-    default:
-      ESP_LOGD(TAG, "%s", message);
-      break;
+    case TWC_LOG_ERROR:   ESP_LOGE(TAG, "%s", message); break;
+    case TWC_LOG_WARNING: ESP_LOGW(TAG, "%s", message); break;
+    case TWC_LOG_INFO:    ESP_LOGI(TAG, "%s", message); break;
+    case TWC_LOG_DEBUG:   ESP_LOGD(TAG, "%s", message); break;
+    case TWC_LOG_VERBOSE: ESP_LOGV(TAG, "%s", message); break;
+    default:              ESP_LOGD(TAG, "%s", message); break;
   }
 }
 
@@ -95,19 +64,15 @@ void log_callback_shim(twc_log_level_t level,
 void TWCDirectorComponent::setup() {
   ESP_LOGI(TAG, "TWC Director setup (master=0x%04X)", this->master_address_);
 
-  // Initialize core and frame decoder
   twc_core_init(&this->core_);
   twc_frame_decoder_init(&this->decoder_);
 
-  // Configure core
   twc_core_set_master_address(&this->core_, this->master_address_);
   twc_core_set_online_timeout(&this->core_, 15000);
 
   if (this->global_max_current_a_ > 0.0f) {
     twc_core_set_global_max_current(&this->core_, this->global_max_current_a_);
     ESP_LOGI(TAG, "Global max current (safety limit): %.1fA", this->global_max_current_a_);
-
-    // Initialize global max control entity to the compile-time value if provided
     if (this->global_max_current_control_ && !this->global_max_current_control_->has_state()) {
       this->global_max_current_control_->publish_state(this->global_max_current_a_);
     }
@@ -116,46 +81,37 @@ void TWCDirectorComponent::setup() {
   ESP_LOGI(TAG, "EVSE max current limit: %.1fA", this->evse_max_current_limit_a_);
 
   if (this->flow_control_pin_) {
-    // Start in receive mode: logical true -> for inverted output -> physical LOW -> DE disabled
-    this->flow_control_pin_->set_state(true);
+    this->flow_control_pin_->set_state(true);  // start in receive mode
     ESP_LOGI(TAG, "Flow control (DE) pin configured");
   }
 
-  // Wire callbacks
   twc_core_set_tx_callback(&this->core_, &tx_callback_shim, this);
   twc_core_set_negotiation_callback(&this->core_, &negotiation_callback_shim, this);
   twc_core_set_autobind_callback(&this->core_, &autobind_callback_shim, this);
   twc_core_set_log_callback(&this->core_, &log_callback_shim, this);
 
-  // Initialize all EVSE slots as offline with session current at 0
   for (auto &evse : evse_entries_) {
     this->publish_binary_sensor_if_changed_(evse.online, false);
-    if (evse.session_current) {
-      evse.session_current->publish_state(0.0f);
-    }
+    if (evse.session_current) evse.session_current->publish_state(0.0f);
   }
 }
 
 void TWCDirectorComponent::loop() {
   uint32_t now = millis();
 
-  this->process_rx_(now);           // UART → SLIP → core
-  this->update_master_mode_(now);   // Monitor master mode switch
-  this->run_master_tick_(now);      // Core master logic
-  this->update_evse_metrics_(now);  // Core → ESPHome sensors
-  this->drain_tx_queue_(now);       // Queued frames → UART
+  this->process_rx_(now);
+  this->update_master_mode_(now);
+  this->run_master_tick_(now);
+  this->update_evse_metrics_(now);
+  this->drain_tx_queue_(now);
 
-  // Update link health sensor
   if (this->link_ok_sensor_) {
     bool link_ok = false;
     if (this->last_valid_frame_ms_ != 0) {
       uint32_t age_ms = (now >= this->last_valid_frame_ms_)
-                          ? (now - this->last_valid_frame_ms_)
-                          : 0;
+                          ? (now - this->last_valid_frame_ms_) : 0;
       link_ok = (age_ms < LINK_TIMEOUT_MS);
     }
-
-    // Log decoder stats when link goes down
     bool prev_link_ok = this->link_ok_sensor_->state;
     if (prev_link_ok && !link_ok) {
       ESP_LOGW(TAG, "Link went down! SLIP decoder stats: decoded=%u dropped_overflow=%u dropped_invalid_esc=%u",
@@ -163,11 +119,9 @@ void TWCDirectorComponent::loop() {
                this->decoder_.frames_dropped_overflow,
                this->decoder_.frames_dropped_invalid_esc);
     }
-
     this->publish_binary_sensor_if_changed_(this->link_ok_sensor_, link_ok);
   }
 
-  // Periodic SLIP decoder and TX diagnostics
   static uint32_t last_stats_ms = 0;
   if (now - last_stats_ms > DECODER_STATS_INTERVAL_MS) {
     last_stats_ms = now;
@@ -183,12 +137,10 @@ void TWCDirectorComponent::loop() {
 }
 
 // =============================================================================
-// RX PATH: UART → SLIP → CORE
+// RX PATH
 // =============================================================================
 
 void TWCDirectorComponent::process_rx_(uint32_t now) {
-  // Feed UART bytes into SLIP decoder
-  // Limit bytes per iteration to avoid starving other tasks (OTA, network, etc.)
   constexpr size_t MAX_BYTES_PER_LOOP = 64;
   size_t bytes_processed = 0;
 
@@ -198,25 +150,19 @@ void TWCDirectorComponent::process_rx_(uint32_t now) {
     bytes_processed++;
 
     uint32_t delta_ms = (this->last_rx_ms_ == 0) ? 0 : (now - this->last_rx_ms_);
-    ESP_LOGV(TAG, "RX byte: 0x%02X t=%ums dt=%ums", b, (unsigned) now, (unsigned) delta_ms);
-
-    // Track RX activity for bus-idle detection
+    ESP_LOGV(TAG, "RX byte: 0x%02X t=%ums dt=%ums", b, (unsigned)now, (unsigned)delta_ms);
     this->last_rx_ms_ = now;
 
-    // Diagnostic: track SLIP decoder state before pushing byte
     bool was_in_frame = this->decoder_.in_frame;
     size_t prev_len = this->decoder_.len;
 
-    // Push byte through decoder
     const uint8_t *frame = nullptr;
     size_t len = 0;
 
     if (twc_frame_decoder_push(&this->decoder_, b, &frame, &len)) {
-      // Complete frame decoded
       ESP_LOGV(TAG, "SLIP: Frame complete, %u bytes", (unsigned)len);
       this->handle_rx_frame_(frame, len, now);
     } else if (b == 0xC0) {
-      // END byte received but no frame returned - log why
       if (!was_in_frame && prev_len == 0) {
         ESP_LOGV(TAG, "SLIP: Frame START");
       } else if (was_in_frame && prev_len == 0) {
@@ -229,15 +175,10 @@ void TWCDirectorComponent::process_rx_(uint32_t now) {
   }
 }
 
-void TWCDirectorComponent::handle_rx_frame_(const uint8_t *frame,
-                                            size_t len,
-                                            uint32_t now) {
+void TWCDirectorComponent::handle_rx_frame_(const uint8_t *frame, size_t len, uint32_t now) {
   if (!frame || len == 0) return;
-
-  // Filter out 1-byte frames - these are typically SLIP end-type markers (0xFC)
-  // that appear between consecutive 0xC0 (END) bytes
   if (len == 1) {
-    ESP_LOGV(TAG, "Ignoring 1-byte SLIP frame: 0x%02X (likely end-type marker)", frame[0]);
+    ESP_LOGV(TAG, "Ignoring 1-byte SLIP frame: 0x%02X", frame[0]);
     return;
   }
 
@@ -245,37 +186,27 @@ void TWCDirectorComponent::handle_rx_frame_(const uint8_t *frame,
   this->format_hex_(frame, len, hex, sizeof(hex));
   ESP_LOGD(TAG, "RX: %s (len=%u)", hex, (unsigned)len);
 
-  // Check for 2-byte broadcast messages (ride on SLIP but aren't TWC frames)
   uint8_t bc_hi = 0, bc_lo = 0;
-  twc_broadcast_kind_t bcast =
-      twc_frame_classify_broadcast(frame, len, &bc_hi, &bc_lo);
-
+  twc_broadcast_kind_t bcast = twc_frame_classify_broadcast(frame, len, &bc_hi, &bc_lo);
   if (bcast != TWC_BCAST_NONE) {
     ESP_LOGV(TAG, "Broadcast: 0x%02X 0x%02X (kind=%d)", bc_hi, bc_lo, bcast);
-    return;  // Don't process as TWC frame
+    return;
   }
 
-  // Ignore obvious noise (too short to be valid)
   if (len < 4) {
     ESP_LOGV(TAG, "Ignoring short frame (%u bytes)", len);
     return;
   }
 
-  // Let core handle the frame (it validates checksum internally)
-  // Core will update device state and trigger auto-bind callback if needed
-  // If the frame passes validation, update link health timestamp
   bool valid = twc_core_handle_frame(&this->core_, frame, len, now);
-  if (valid) {
-    this->last_valid_frame_ms_ = now;
-  }
+  if (valid) this->last_valid_frame_ms_ = now;
 }
 
 // =============================================================================
-// TX PATH: CORE → SLIP → UART
+// TX PATH
 // =============================================================================
 
 void TWCDirectorComponent::run_master_tick_(uint32_t now) {
-  // Core master logic: heartbeats, probes, current allocation
   twc_core_master_tick(&this->core_, now);
 }
 
@@ -286,33 +217,26 @@ void TWCDirectorComponent::handle_tx_frame_(const uint8_t *frame, size_t len) {
     return;
   }
 
-  // Log unescaped frame
   char hex[3 * 256 + 1];
   this->format_hex_(frame, len, hex, sizeof(hex));
   ESP_LOGD(TAG, "TX: %s", hex);
 
-  // SLIP encode
   PendingTx pending;
   size_t encoded_len = 0;
-
-  if (!twc_frame_encode_slip(frame, len, pending.buf,
-                              sizeof(pending.buf), &encoded_len)) {
+  if (!twc_frame_encode_slip(frame, len, pending.buf, sizeof(pending.buf), &encoded_len)) {
     this->tx_encode_failures_++;
     ESP_LOGW(TAG, "SLIP encode failed (len=%u, total_failures=%u)",
              (unsigned)len, (unsigned)this->tx_encode_failures_);
     return;
   }
-
   pending.len = encoded_len;
 
-  // Queue for transmission (with flow control)
   if (this->tx_queue_.size() >= MAX_TX_QUEUE_SIZE) {
     this->tx_frames_dropped_++;
     ESP_LOGW(TAG, "TX queue full, dropping oldest (total_dropped=%u)",
              (unsigned)this->tx_frames_dropped_);
     this->tx_queue_.erase(this->tx_queue_.begin());
   }
-
   this->tx_queue_.push_back(pending);
   this->tx_frames_queued_++;
 }
@@ -321,36 +245,20 @@ void TWCDirectorComponent::drain_tx_queue_(uint32_t now) {
   if (this->tx_queue_.empty()) return;
   if (now < this->next_tx_at_ms_) return;
 
-  // Bus-idle guard: wait for quiet bus before transmitting
   uint32_t idle_ms = (this->last_rx_ms_ == 0) ? 1000 : (now - this->last_rx_ms_);
   if (idle_ms < BUS_IDLE_GUARD_MS) return;
 
-  // Send one frame
   PendingTx pending = this->tx_queue_.front();
   this->tx_queue_.erase(this->tx_queue_.begin());
 
-  // Assert flow control: enable the RS-485 driver (transmit mode).
-  // For a combined DE+/RE pin wired as an inverted output:
-  //   set_state(false) = logical LOW = inverted -> physical HIGH -> DE enabled.
-  // This mirrors jnicolson's flow_control_pin->digital_write(true) before TX.
-  if (this->flow_control_pin_) {
-    this->flow_control_pin_->set_state(false);
-  }
+  // Assert DE: set_state(false) -> logical LOW -> inverted -> physical HIGH -> driver enabled
+  if (this->flow_control_pin_) this->flow_control_pin_->set_state(false);
 
-  for (size_t i = 0; i < pending.len; ++i) {
-    this->write(pending.buf[i]);
-  }
-
-  // Wait for the UART hardware FIFO to drain before releasing DE.
-  // Without this, DE is released before the last bytes leave the wire.
+  for (size_t i = 0; i < pending.len; ++i) this->write(pending.buf[i]);
   this->flush();
 
-  // Release flow control: back to receive mode.
-  // set_state(true) = logical HIGH = inverted -> physical LOW -> DE disabled, /RE low = RX enabled.
-  // Mirrors jnicolson's flow_control_pin->digital_write(false) after flush().
-  if (this->flow_control_pin_) {
-    this->flow_control_pin_->set_state(true);
-  }
+  // Release DE: set_state(true) -> logical HIGH -> inverted -> physical LOW -> receiver enabled
+  if (this->flow_control_pin_) this->flow_control_pin_->set_state(true);
 
   this->next_tx_at_ms_ = now + TX_INTERFRAME_GAP_MS;
 }
@@ -360,23 +268,17 @@ void TWCDirectorComponent::drain_tx_queue_(uint32_t now) {
 // =============================================================================
 
 void TWCDirectorComponent::handle_auto_bind_(uint16_t address, twc_mode_t mode) {
-  // Don't auto-bind our own address
   if (address == this->master_address_) return;
 
-  // Don't rebind already-bound EVSEs
   for (auto &evse : this->evse_entries_) {
-    if (evse.bound && evse.address == address) {
-      return;  // Already bound
-    }
+    if (evse.bound && evse.address == address) return;
   }
 
-  // Find first unbound slot
   for (auto &evse : this->evse_entries_) {
     if (!evse.bound) {
       evse.bound = true;
       evse.address = address;
 
-      // Update number entity addresses
       if (evse.max_current) {
         auto *n = static_cast<TWCDirectorCurrentNumber *>(evse.max_current);
         n->set_parent(this, address, TWCDirectorCurrentNumber::TYPE_MAX);
@@ -389,22 +291,15 @@ void TWCDirectorComponent::handle_auto_bind_(uint16_t address, twc_mode_t mode) 
         auto *n = static_cast<TWCDirectorCurrentNumber *>(evse.session_current);
         n->set_parent(this, address, TWCDirectorCurrentNumber::TYPE_SESSION);
       }
-      if (evse.contactor) {
-        evse.contactor->set_parent(this, address);
-      }
-      if (evse.increase_current_button) {
+      if (evse.contactor) evse.contactor->set_parent(this, address);
+      if (evse.increase_current_button)
         evse.increase_current_button->set_parent(this, address, TWCDirectorCurrentButton::INCREASE);
-      }
-      if (evse.decrease_current_button) {
+      if (evse.decrease_current_button)
         evse.decrease_current_button->set_parent(this, address, TWCDirectorCurrentButton::DECREASE);
-      }
-      if (evse.enable_switch) {
-        evse.enable_switch->set_parent(this, address);
-      }
+      if (evse.enable_switch) evse.enable_switch->set_parent(this, address);
 
       int slot = &evse - this->evse_entries_.data();
-      ESP_LOGI(TAG, "Auto-bound slot %d → TWC 0x%04X (mode=%d)",
-               slot, address, (int)mode);
+      ESP_LOGI(TAG, "Auto-bound slot %d -> TWC 0x%04X (mode=%d)", slot, address, (int)mode);
       return;
     }
   }
@@ -418,43 +313,30 @@ void TWCDirectorComponent::handle_auto_bind_(uint16_t address, twc_mode_t mode) 
 
 void TWCDirectorComponent::update_master_mode_(uint32_t now) {
   if (!this->master_mode_switch_) return;
-
   bool enabled = this->master_mode_switch_->state;
-
   if (enabled != this->master_mode_last_state_) {
     twc_core_set_master_mode(&this->core_, enabled);
-
-    if (enabled) {
-      ESP_LOGI(TAG, "Master mode ENABLED (addr=0x%04X)", this->master_address_);
-    } else {
-      ESP_LOGI(TAG, "Master mode DISABLED");
-    }
-
+    ESP_LOGI(TAG, enabled ? "Master mode ENABLED (addr=0x%04X)" : "Master mode DISABLED",
+             this->master_address_);
     this->master_mode_last_state_ = enabled;
   }
 }
 
 // =============================================================================
-// EVSE METRICS: CORE → ESPHOME SENSORS
+// EVSE METRICS: CORE -> ESPHOME SENSORS
 // =============================================================================
 
 void TWCDirectorComponent::update_evse_metrics_(uint32_t now) {
   for (auto &evse : this->evse_entries_) {
-    if (!evse.bound) continue;  // Skip unbound slots
-
-    // Sync desired current from number entity to core
+    if (!evse.bound) continue;
     this->sync_desired_current_(evse);
-
-    // Update all sensors from core state
     this->update_evse_sensors_(evse, now);
   }
 
-  // Publish count of EVSEs currently charging
   if (this->charging_count_sensor_) {
     int count = 0;
     for (const auto &evse : this->evse_entries_) {
-      if (evse.bound && evse.last_session_amps > 0.1f)
-        count++;
+      if (evse.bound && evse.last_session_amps > 0.1f) count++;
     }
     this->publish_sensor_(this->charging_count_sensor_, static_cast<float>(count));
   }
@@ -462,10 +344,7 @@ void TWCDirectorComponent::update_evse_metrics_(uint32_t now) {
 
 void TWCDirectorComponent::sync_desired_current_(EvseEntry &evse) {
   if (!evse.initial_current || !evse.initial_current->has_state()) return;
-
   float desired = evse.initial_current->state;
-
-  // Only update if changed (avoid spam)
   if (evse.last_initial_current_setpoint_a < 0.0f ||
       fabsf(desired - evse.last_initial_current_setpoint_a) > 0.1f) {
     twc_core_set_desired_initial_current(&this->core_, evse.address, desired);
@@ -474,94 +353,76 @@ void TWCDirectorComponent::sync_desired_current_(EvseEntry &evse) {
 }
 
 void TWCDirectorComponent::update_evse_sensors_(EvseEntry &evse, uint32_t now) {
-  twc_core_device_t *core_dev =
-      twc_core_get_device_by_address(&this->core_, evse.address);
-
+  twc_core_device_t *core_dev = twc_core_get_device_by_address(&this->core_, evse.address);
   if (!core_dev) return;
-
   const twc_device_t *dev = &core_dev->device;
 
-  // Online status
   bool online = twc_core_device_online(&this->core_, core_dev, now);
   this->publish_binary_sensor_if_changed_(evse.online, online);
 
-  // Mode (always publish, even if offline)
   const char *mode_str = this->mode_to_string_(twc_device_get_mode(dev));
   this->publish_text_sensor_if_changed_(evse.mode, mode_str);
 
-  // Status text from E0 status byte
   int status_code = twc_device_get_status_code(dev);
   const char *status_str = twc_charge_state_to_string(static_cast<twc_charge_state_t>(status_code));
 
-  // Log status transitions with current values for debugging
   if (evse.last_status_code != -1 && status_code != evse.last_status_code) {
     const char *old_status_str = twc_charge_state_to_string(
         static_cast<twc_charge_state_t>(evse.last_status_code));
-
     float available_a = twc_core_get_current_available_a(core_dev);
     float applied_initial_a = core_dev->applied_initial_current_a;
     float desired_initial_a = core_dev->desired_initial_current_a;
-
     ESP_LOGI(TAG, "TWC 0x%04X: %s -> %s (available=%.1fA, applied=%.1fA, desired=%.1fA)",
              evse.address, old_status_str, status_str,
              available_a, applied_initial_a, desired_initial_a);
-
-    // Publish to status_log text sensor for Home Assistant history
     if (evse.status_log) {
       char log_msg[128];
       snprintf(log_msg, sizeof(log_msg), "%s -> %s (%.1fA/%.1fA/%.1fA)",
-               old_status_str, status_str,
-               available_a, applied_initial_a, desired_initial_a);
+               old_status_str, status_str, available_a, applied_initial_a, desired_initial_a);
       evse.status_log->publish_state(log_msg);
     }
   }
-
   this->publish_text_sensor_if_changed_(evse.status_text, status_str);
   evse.last_status_code = status_code;
 
-  // Contactor status: infer from actual drawn current (slave heartbeat reportedActual).
-  // session_amps uses twc_device_get_current_available_a() which reads reportedActual.
+  // Session current: actual amps drawn, from FD E0 slave heartbeat reportedActual.
+  // TWC Gen2 has NO per-phase current data in the FD EB frame.
   float session_amps = this->compute_session_amps_(dev);
-  bool contactor_closed = (session_amps > 0.1f);  // 0.1A threshold to avoid noise
+  bool contactor_closed = (session_amps > 0.1f);
   this->publish_binary_sensor_if_changed_(evse.contactor_status, contactor_closed);
 
-  // Sync session current number on charging state transitions
   bool was_zero = (evse.last_session_amps < 0.1f);
   bool is_nonzero = (session_amps > 0.1f);
   if (evse.session_current) {
     if (was_zero && is_nonzero) {
-      // 0 → >0: charging started, sync to TWC's available current
       float available_a = twc_device_get_current_available_a(dev);
       if (available_a > 0.0f) {
-        ESP_LOGI(TAG, "TWC 0x%04X: charging started (%.1fA), syncing session current number to %.1fA",
+        ESP_LOGI(TAG, "TWC 0x%04X: charging started (%.1fA), syncing session current to %.1fA",
                  evse.address, session_amps, available_a);
         evse.session_current->publish_state(available_a);
-        // Also update the core's desired session current so it stays in sync
-        // with the published number. Without this, desired stays at 0 and
-        // setting the number to the same value won't trigger control().
         twc_core_set_desired_session_current(&this->core_, evse.address, available_a);
       }
     } else if (!was_zero && !is_nonzero) {
-      // >0 → 0: charging stopped, reset session current number to 0
+      // Charging stopped: zero out session number and all stale meter readings.
       if (evse.session_current->state > 0.1f) {
-        ESP_LOGI(TAG, "TWC 0x%04X: charging stopped, resetting session current number to 0",
+        ESP_LOGI(TAG, "TWC 0x%04X: charging stopped, resetting session current to 0",
                  evse.address);
         evse.session_current->publish_state(0.0f);
       }
+      // Clear stale HA-retained values so they don't linger between sessions.
+      this->publish_sensor_(evse.session_current_sensor, 0.0f);
+      this->publish_sensor_(evse.meter_voltage_phase_a, 0.0f);
+      this->publish_sensor_(evse.meter_voltage_phase_b, 0.0f);
+      this->publish_sensor_(evse.meter_voltage_phase_c, 0.0f);
     }
 
-    // When in "Setting Limit" status (0x09), sync session current number to the
-    // applied value so it "springs back" if the requested value was scaled down
-    // due to global max current constraints
     if (status_code == TWC_HB_SETTING_LIMIT) {
       twc_core_device_t *core_dev2 = twc_core_get_device_by_address(&this->core_, evse.address);
       if (core_dev2 && core_dev2->applied_session_current_a > 0.0f) {
         float applied = core_dev2->applied_session_current_a;
-        float current_state = evse.session_current->state;
-        // Only update if there's a meaningful difference (avoid float noise)
-        if (fabsf(current_state - applied) > 0.1f) {
-          ESP_LOGD(TAG, "TWC 0x%04X: Setting Limit - syncing session current %.1fA → %.1fA (scaled)",
-                   evse.address, current_state, applied);
+        if (fabsf(evse.session_current->state - applied) > 0.1f) {
+          ESP_LOGD(TAG, "TWC 0x%04X: Setting Limit - syncing session current %.1fA -> %.1fA",
+                   evse.address, evse.session_current->state, applied);
           evse.session_current->publish_state(applied);
         }
       }
@@ -569,35 +430,24 @@ void TWCDirectorComponent::update_evse_sensors_(EvseEntry &evse, uint32_t now) {
   }
   evse.last_session_amps = session_amps;
 
-  // Sync contactor switch state from session current:
-  // - When session current > 0, switch should show ON (charging active)
-  // - When session current = 0, switch should show OFF (not charging)
   if (evse.contactor) {
-    bool should_be_on = contactor_closed;
-    if (evse.last_contactor_switch_state != should_be_on) {
+    if (evse.last_contactor_switch_state != contactor_closed) {
       ESP_LOGD(TAG, "TWC 0x%04X: syncing contactor switch to %s (session=%.1fA)",
-               evse.address, should_be_on ? "ON" : "OFF", session_amps);
-      evse.contactor->publish_state(should_be_on);
-      evse.last_contactor_switch_state = should_be_on;
+               evse.address, contactor_closed ? "ON" : "OFF", session_amps);
+      evse.contactor->publish_state(contactor_closed);
+      evse.last_contactor_switch_state = contactor_closed;
     }
   }
 
-  if (!online) return;  // Don't spam metrics when offline
+  if (!online) return;
 
-  // Throttle updates
   if (evse.last_metrics_publish_ms != 0 &&
-      (now - evse.last_metrics_publish_ms) < METRICS_UPDATE_INTERVAL_MS) {
-    return;
-  }
+      (now - evse.last_metrics_publish_ms) < METRICS_UPDATE_INTERVAL_MS) return;
   evse.last_metrics_publish_ms = now;
 
-  // Identity
-  this->publish_nonempty_(evse.firmware_version,
-                         twc_device_get_software_version(dev));
-  this->publish_nonempty_(evse.serial_number,
-                         twc_device_get_serial_number(dev));
+  this->publish_nonempty_(evse.firmware_version, twc_device_get_software_version(dev));
+  this->publish_nonempty_(evse.serial_number, twc_device_get_serial_number(dev));
 
-  // Vehicle
   bool vehicle_connected = twc_device_get_vehicle_connected(dev);
   this->publish_binary_sensor_if_changed_(evse.vehicle_connected, vehicle_connected);
 
@@ -605,63 +455,42 @@ void TWCDirectorComponent::update_evse_sensors_(EvseEntry &evse, uint32_t now) {
   std::string vin_str = vin ? std::string(vin) : std::string();
   this->publish_text_sensor_if_changed_(evse.vehicle_vin, vin_str);
 
-  // Meter: phase currents (TWC Gen2 does not report these; decoder now returns 0.0f)
-  this->publish_sensor_(evse.meter_current_phase_a,
-                       twc_device_get_phase_a_current_a(dev));
-  this->publish_sensor_(evse.meter_current_phase_b,
-                       twc_device_get_phase_b_current_a(dev));
-  this->publish_sensor_(evse.meter_current_phase_c,
-                       twc_device_get_phase_c_current_a(dev));
+  // FD EB frame: kWh(4) + voltageA(2) + voltageB(2) + voltageC(2).
+  // There are NO per-phase current bytes in TWC Gen2 — do not publish
+  // meter_current_phase_a/b/c; the C library getters read voltage bytes
+  // and produce garbage values (e.g. 228V misread as 114A).
+  this->publish_sensor_(evse.meter_voltage_phase_a, twc_device_get_phase_a_voltage_v(dev));
+  this->publish_sensor_(evse.meter_voltage_phase_b, twc_device_get_phase_b_voltage_v(dev));
+  this->publish_sensor_(evse.meter_voltage_phase_c, twc_device_get_phase_c_voltage_v(dev));
+  this->publish_sensor_(evse.meter_energy_total, twc_device_get_total_energy_kwh(dev), 0.001f);
+  this->publish_sensor_(evse.meter_energy_session, twc_device_get_session_energy_kwh(dev), 0.001f);
 
-  // Meter: phase voltages (correctly parsed from FD EB frame bytes [4-9])
-  this->publish_sensor_(evse.meter_voltage_phase_a,
-                       twc_device_get_phase_a_voltage_v(dev));
-  this->publish_sensor_(evse.meter_voltage_phase_b,
-                       twc_device_get_phase_b_voltage_v(dev));
-  this->publish_sensor_(evse.meter_voltage_phase_c,
-                       twc_device_get_phase_c_voltage_v(dev));
-
-  // Meter: energy
-  this->publish_sensor_(evse.meter_energy_total,
-                       twc_device_get_total_energy_kwh(dev), 0.001f);
-  this->publish_sensor_(evse.meter_energy_session,
-                       twc_device_get_session_energy_kwh(dev), 0.001f);
-
-  // Current allocation
   float initial_current_a = twc_core_get_current_available_a(core_dev);
   this->publish_sensor_(evse.available_current_sensor, initial_current_a);
-
   this->publish_sensor_(evse.session_current_sensor, session_amps);
 }
 
 float TWCDirectorComponent::compute_session_amps_(const twc_device_t *dev) const {
   if (!dev) return 0.0f;
-  // TWC Gen2 does not report per-phase current measurements in the FD EB frame.
-  // The only real current data is reportedActual from the FD E0 slave heartbeat,
-  // exposed via twc_device_get_current_available_a(). This returns the actual
-  // amps the car is drawing as reported by the TWC in each slave heartbeat.
+  // TWC Gen2 FD EB frame: kWh(4) + voltageA(2) + voltageB(2) + voltageC(2).
+  // There are NO per-phase current bytes. twc_device_get_phase_a/b/c_current_a()
+  // read the voltage bytes and return garbage (e.g. 228V -> 114A).
+  // The only real current data is reportedActual from the FD E0 slave heartbeat.
   return twc_device_get_current_available_a(dev);
 }
 
 // =============================================================================
-// CURRENT CONTROL (ESPHome Number → Core)
+// CURRENT CONTROL
 // =============================================================================
 
 void TWCDirectorComponent::handle_current_number_control(
     uint16_t address, float value, TWCDirectorCurrentNumber::CurrentType type) {
-  // Special handling for global max current control
   if (type == TWCDirectorCurrentNumber::TYPE_GLOBAL_MAX) {
-    // Clamp to safety maximum
     if (value < 0.0f) value = 0.0f;
-    if (this->global_max_current_a_ > 0.0f && value > this->global_max_current_a_) {
+    if (this->global_max_current_a_ > 0.0f && value > this->global_max_current_a_)
       value = this->global_max_current_a_;
-    }
-
     ESP_LOGI(TAG, "Global max current control: %.1fA (safety max: %.1fA)",
              value, this->global_max_current_a_);
-
-    // The value is stored in the number entity itself, we just validate it here
-    // The get_effective_global_max_current_() helper will read it when needed
     return;
   }
 
@@ -670,14 +499,12 @@ void TWCDirectorComponent::handle_current_number_control(
     return;
   }
 
-  // Clamp to reasonable range
   if (value < 0.0f) value = 0.0f;
   float max_val = (type == TWCDirectorCurrentNumber::TYPE_MAX) ? 80.0f : this->evse_max_current_limit_a_;
   if (value > max_val) value = max_val;
 
   const char *type_str = (type == TWCDirectorCurrentNumber::TYPE_MAX) ? "max" :
                          (type == TWCDirectorCurrentNumber::TYPE_SESSION) ? "session" : "initial";
-
   ESP_LOGI(TAG, "Current control: TWC 0x%04X %s current %.1fA", address, type_str, value);
 
   EvseEntry *evse = this->find_evse_(address);
@@ -688,20 +515,13 @@ void TWCDirectorComponent::handle_current_number_control(
 
   switch (type) {
     case TWCDirectorCurrentNumber::TYPE_INITIAL:
-      // Initial current: update initial setpoint and redistribute if needed
       this->handle_initial_current_change_(evse, address, value);
       break;
-
     case TWCDirectorCurrentNumber::TYPE_MAX:
-      // Max current: authoritative upper bound
       twc_core_set_max_current(&this->core_, address, value);
       evse->last_max_current_setpoint_a = value;
       break;
-
     case TWCDirectorCurrentNumber::TYPE_SESSION:
-      // Session current: update session setpoint
-      // The C library will handle reconciliation and scheduling the 0x09 command
-      // with the applied (scaled) value that respects global max current
       twc_core_set_desired_session_current(&this->core_, address, value);
       ESP_LOGI(TAG, "Set desired session current for TWC 0x%04X to %.1fA", address, value);
       break;
@@ -711,17 +531,14 @@ void TWCDirectorComponent::handle_current_number_control(
 void TWCDirectorComponent::handle_initial_current_change_(EvseEntry *changed_evse,
                                                           uint16_t address,
                                                           float new_value) {
-  // Get the effective global max (runtime or compile-time)
   float effective_max = this->get_effective_global_max_current_();
 
-  // If no global max, just set the value directly
   if (effective_max <= 0.0f) {
     twc_core_set_desired_initial_current(&this->core_, address, new_value);
     changed_evse->last_initial_current_setpoint_a = new_value;
     return;
   }
 
-  // Calculate total desired current with the new value
   float total_desired = new_value;
   for (auto &evse : this->evse_entries_) {
     if (!evse.bound || evse.address == address) continue;
@@ -729,7 +546,6 @@ void TWCDirectorComponent::handle_initial_current_change_(EvseEntry *changed_evs
     total_desired += evse.initial_current->state;
   }
 
-  // If we're within limit, just set it
   if (total_desired <= effective_max) {
     twc_core_set_desired_initial_current(&this->core_, address, new_value);
     changed_evse->last_initial_current_setpoint_a = new_value;
@@ -738,91 +554,62 @@ void TWCDirectorComponent::handle_initial_current_change_(EvseEntry *changed_evs
     return;
   }
 
-  // Exceeds limit - redistribute proportionally
-  ESP_LOGW(TAG, "Initial current %.1fA for 0x%04X would exceed global max (total %.1fA > %.1fA), redistributing",
+  ESP_LOGW(TAG, "Initial current %.1fA for 0x%04X exceeds global max (%.1fA > %.1fA), redistributing",
            new_value, address, total_desired, effective_max);
 
-  // Calculate how much we need to reduce
   float scale = effective_max / total_desired;
-
-  // Apply scaled values to all EVSEs (including the one being changed)
   for (auto &evse : this->evse_entries_) {
-    if (!evse.bound) continue;
-    if (!evse.initial_current) continue;
-
+    if (!evse.bound || !evse.initial_current) continue;
     float desired = (evse.address == address) ? new_value : evse.initial_current->state;
-    float scaled = desired * scale;
-
-    // Round to 0.1A for cleaner UI
-    scaled = roundf(scaled * 10.0f) / 10.0f;
-
-    // Update the number entity - this will be visible to the user
+    float scaled = roundf(desired * scale * 10.0f) / 10.0f;
     if (evse.initial_current->state != scaled) {
       evse.initial_current->publish_state(scaled);
-      ESP_LOGI(TAG, "Redistributed: TWC 0x%04X initial current %.1fA → %.1fA",
+      ESP_LOGI(TAG, "Redistributed: TWC 0x%04X initial current %.1fA -> %.1fA",
                evse.address, desired, scaled);
     }
-
-    // Update core
     twc_core_set_desired_initial_current(&this->core_, evse.address, scaled);
     evse.last_initial_current_setpoint_a = scaled;
   }
 }
 
 // =============================================================================
-// HELPER FUNCTIONS
+// HELPERS
 // =============================================================================
 
 float TWCDirectorComponent::get_effective_global_max_current_() const {
-  // If runtime control is available and has a value, use it (already clamped to safety max)
-  if (this->global_max_current_control_ && this->global_max_current_control_->has_state()) {
+  if (this->global_max_current_control_ && this->global_max_current_control_->has_state())
     return this->global_max_current_control_->state;
-  }
-  // Otherwise use compile-time value
   return this->global_max_current_a_;
 }
 
 void TWCDirectorComponent::publish_binary_sensor_if_changed_(
     binary_sensor::BinarySensor *sensor, bool value) {
-  if (sensor && (!sensor->has_state() || sensor->state != value)) {
+  if (sensor && (!sensor->has_state() || sensor->state != value))
     sensor->publish_state(value);
-  }
 }
 
-void TWCDirectorComponent::publish_sensor_(sensor::Sensor *sensor,
-                                           float value,
-                                           float epsilon) {
-  if (sensor && (!sensor->has_state() || fabsf(sensor->state - value) > epsilon)) {
+void TWCDirectorComponent::publish_sensor_(sensor::Sensor *sensor, float value, float epsilon) {
+  if (sensor && (!sensor->has_state() || fabsf(sensor->state - value) > epsilon))
     sensor->publish_state(value);
-  }
 }
 
 void TWCDirectorComponent::publish_text_sensor_if_changed_(
     text_sensor::TextSensor *sensor, const std::string &value) {
-  if (sensor && (!sensor->has_state() || sensor->state != value)) {
+  if (sensor && (!sensor->has_state() || sensor->state != value))
     sensor->publish_state(value);
-  }
 }
 
-void TWCDirectorComponent::publish_nonempty_(text_sensor::TextSensor *sensor,
-                                             const char *value) {
-  if (sensor && value && value[0] != '\0') {
+void TWCDirectorComponent::publish_nonempty_(text_sensor::TextSensor *sensor, const char *value) {
+  if (sensor && value && value[0] != '\0')
     this->publish_text_sensor_if_changed_(sensor, value);
-  }
 }
 
-void TWCDirectorComponent::format_hex_(const uint8_t *data, size_t len,
-                                      char *out, size_t out_size) {
+void TWCDirectorComponent::format_hex_(const uint8_t *data, size_t len, char *out, size_t out_size) {
   if (!out || out_size == 0) return;
-  if (!data || len == 0) {
-    out[0] = '\0';
-    return;
-  }
-
+  if (!data || len == 0) { out[0] = '\0'; return; }
   size_t pos = 0;
   for (size_t i = 0; i < len && pos + 4 < out_size; i++) {
-    int n = snprintf(&out[pos], out_size - pos,
-                     (i == 0) ? "%02X" : " %02X", data[i]);
+    int n = snprintf(&out[pos], out_size - pos, (i == 0) ? "%02X" : " %02X", data[i]);
     if (n <= 0) break;
     pos += n;
   }
@@ -831,21 +618,18 @@ void TWCDirectorComponent::format_hex_(const uint8_t *data, size_t len,
 
 const char *TWCDirectorComponent::mode_to_string_(twc_mode_t mode) const {
   switch (mode) {
-    case TWC_MODE_MASTER: return "Master";
-    case TWC_MODE_FOREIGN_MASTER: return "Foreign Master";
+    case TWC_MODE_MASTER:            return "Master";
+    case TWC_MODE_FOREIGN_MASTER:    return "Foreign Master";
     case TWC_MODE_UNCONF_PERIPHERAL: return "Unconfigured Peripheral";
-    case TWC_MODE_PERIPHERAL: return "Peripheral";
-    case TWC_MODE_FOREIGN_PERIPHERAL: return "Foreign Peripheral";
-    case TWC_MODE_UNKNOWN:
-    default: return "Unknown";
+    case TWC_MODE_PERIPHERAL:        return "Peripheral";
+    case TWC_MODE_FOREIGN_PERIPHERAL:return "Foreign Peripheral";
+    case TWC_MODE_UNKNOWN: default:  return "Unknown";
   }
 }
 
 TWCDirectorComponent::EvseEntry *TWCDirectorComponent::find_evse_(uint16_t address) {
   for (auto &evse : this->evse_entries_) {
-    if (evse.bound && evse.address == address) {
-      return &evse;
-    }
+    if (evse.bound && evse.address == address) return &evse;
   }
   return nullptr;
 }
@@ -855,9 +639,7 @@ TWCDirectorComponent::EvseEntry *TWCDirectorComponent::find_evse_(uint16_t addre
 // =============================================================================
 
 void TWCDirectorContactorSwitch::write_state(bool state) {
-  if (this->parent_) {
-    this->parent_->request_contactor_state(this->address_, state);
-  }
+  if (this->parent_) this->parent_->request_contactor_state(this->address_, state);
   this->publish_state(state);
 }
 
@@ -868,9 +650,7 @@ void TWCDirectorMasterModeSwitch::write_state(bool state) {
 void TWCDirectorEnableSwitch::write_state(bool state) {
   ESP_LOGI(TAG, "EnableSwitch::write_state: addr=0x%04X enabled=%s",
            this->address_, state ? "true" : "false");
-  if (this->parent_) {
-    this->parent_->set_evse_enabled(this->address_, state);
-  }
+  if (this->parent_) this->parent_->set_evse_enabled(this->address_, state);
   this->publish_state(state);
 }
 
@@ -878,17 +658,13 @@ void TWCDirectorCurrentNumber::control(float value) {
   const char *type_str = (this->type_ == TYPE_MAX) ? "max" :
                          (this->type_ == TYPE_SESSION) ? "session" :
                          (this->type_ == TYPE_GLOBAL_MAX) ? "global_max" : "initial";
-
   ESP_LOGI(TAG, "CurrentNumber::control called: addr=0x%04X value=%.1fA type=%s parent=%p",
            this->address_, value, type_str, (void*)this->parent_);
-
   if (this->parent_) {
-    // Global max doesn't need a valid address
-    if (this->type_ == TYPE_GLOBAL_MAX || this->address_ != 0) {
+    if (this->type_ == TYPE_GLOBAL_MAX || this->address_ != 0)
       this->parent_->handle_current_number_control(this->address_, value, this->type_);
-    } else {
+    else
       ESP_LOGW(TAG, "CurrentNumber::control: address is 0 for non-global type!");
-    }
   } else {
     ESP_LOGW(TAG, "CurrentNumber::control: parent is null!");
   }
@@ -898,12 +674,10 @@ void TWCDirectorCurrentNumber::control(float value) {
 void TWCDirectorCurrentButton::press_action() {
   const char *type_str = (this->type_ == INCREASE) ? "increase" : "decrease";
   ESP_LOGI(TAG, "CurrentButton::press_action: addr=0x%04X type=%s", this->address_, type_str);
-
-  if (this->parent_) {
+  if (this->parent_)
     this->parent_->request_current_change(this->address_, this->type_);
-  } else {
+  else
     ESP_LOGW(TAG, "CurrentButton::press_action: parent is null!");
-  }
 }
 
 void TWCDirectorComponent::request_current_change(uint16_t address,
@@ -912,7 +686,6 @@ void TWCDirectorComponent::request_current_change(uint16_t address,
     ESP_LOGW(TAG, "Current change request ignored: master mode not enabled");
     return;
   }
-
   if (type == TWCDirectorCurrentButton::INCREASE) {
     ESP_LOGI(TAG, "Queuing increase current command for TWC 0x%04X", address);
     twc_core_send_increase_current(&this->core_, address);
@@ -933,10 +706,8 @@ void TWCDirectorComponent::set_master_address(uint16_t addr) {
 void TWCDirectorComponent::set_evse_enabled(uint16_t address, bool enabled) {
   EvseEntry *evse = this->find_evse_(address);
   if (!evse) {
-    // For auto-bind slots that haven't been bound yet, find by slot index
     for (auto &e : this->evse_entries_) {
       if (!e.bound && e.enable_switch && e.enable_switch->state != enabled) {
-        // This is likely the unbound slot being toggled
         e.enabled = enabled;
         ESP_LOGI(TAG, "EVSE (unbound slot) enabled=%s", enabled ? "true" : "false");
         return;
@@ -945,35 +716,22 @@ void TWCDirectorComponent::set_evse_enabled(uint16_t address, bool enabled) {
     ESP_LOGW(TAG, "set_evse_enabled: EVSE 0x%04X not found", address);
     return;
   }
-
   evse->enabled = enabled;
   ESP_LOGI(TAG, "EVSE 0x%04X enabled=%s", address, enabled ? "true" : "false");
-
-  // If disabling, also tell the core to stop sending heartbeats to this device
   twc_core_device_t *core_dev = twc_core_get_device_by_address(&this->core_, address);
-  if (core_dev) {
-    twc_core_set_device_enabled(&this->core_, address, enabled);
-  }
+  if (core_dev) twc_core_set_device_enabled(&this->core_, address, enabled);
 }
 
 void TWCDirectorComponent::request_contactor_state(uint16_t address, bool closed) {
-  ESP_LOGI(TAG, "Contactor %s request for TWC 0x%04X",
-           closed ? "CLOSE" : "OPEN", address);
-
-  // Send contactor command frame (0xB1 = close, 0xB2 = open)
-  // Uses TWC_MARKER_ANNOUNCE (0xFC) per protocol spec
+  ESP_LOGI(TAG, "Contactor %s request for TWC 0x%04X", closed ? "CLOSE" : "OPEN", address);
   twc_cmd_t cmd = closed ? TWC_CMD_CLOSE_CONTACTORS : TWC_CMD_OPEN_CONTACTORS;
-
   uint8_t frame[16];
-  size_t len = twc_build_contactor_frame(this->master_address_, address, cmd,
-                                         frame, sizeof(frame));
-
-  if (len > 0) {
+  size_t len = twc_build_contactor_frame(this->master_address_, address, cmd, frame, sizeof(frame));
+  if (len > 0)
     this->handle_tx_frame_(frame, len);
-  } else {
+  else
     ESP_LOGW(TAG, "Failed to build contactor %s frame for TWC 0x%04X",
              closed ? "CLOSE" : "OPEN", address);
-  }
 }
 
 void TWCDirectorComponent::add_evse(
@@ -1010,7 +768,6 @@ void TWCDirectorComponent::add_evse(
   entry.auto_bound = (address == 0);
   entry.bound = (address != 0);
 
-  // Wire up all the sensors/entities
   entry.online = online;
   entry.mode = mode;
   entry.status_text = status_text;
@@ -1019,9 +776,17 @@ void TWCDirectorComponent::add_evse(
   entry.serial_number = serial_number;
   entry.vehicle_connected = vehicle_connected;
   entry.vehicle_vin = vehicle_vin;
-  entry.meter_current_phase_a = meter_current_phase_a;
-  entry.meter_current_phase_b = meter_current_phase_b;
-  entry.meter_current_phase_c = meter_current_phase_c;
+
+  // TWC Gen2 FD EB has no per-phase current data; null these out so they
+  // are never published. The yaml schema parameters are accepted for
+  // forward compatibility but the sensor pointers are intentionally ignored.
+  (void)meter_current_phase_a;
+  (void)meter_current_phase_b;
+  (void)meter_current_phase_c;
+  entry.meter_current_phase_a = nullptr;
+  entry.meter_current_phase_b = nullptr;
+  entry.meter_current_phase_c = nullptr;
+
   entry.meter_voltage_phase_a = meter_voltage_phase_a;
   entry.meter_voltage_phase_b = meter_voltage_phase_b;
   entry.meter_voltage_phase_c = meter_voltage_phase_c;
@@ -1037,17 +802,14 @@ void TWCDirectorComponent::add_evse(
   entry.session_current_sensor = session_current_sensor;
 
   if (contactor) contactor->set_parent(this, address);
-
   if (max_current) {
     auto *n = static_cast<TWCDirectorCurrentNumber *>(max_current);
     n->set_parent(this, address, TWCDirectorCurrentNumber::TYPE_MAX);
   }
-
   if (initial_current) {
     auto *n = static_cast<TWCDirectorCurrentNumber *>(initial_current);
     n->set_parent(this, address, TWCDirectorCurrentNumber::TYPE_INITIAL);
   }
-
   if (session_current) {
     auto *n = static_cast<TWCDirectorCurrentNumber *>(session_current);
     n->set_parent(this, address, TWCDirectorCurrentNumber::TYPE_SESSION);
@@ -1057,17 +819,12 @@ void TWCDirectorComponent::add_evse(
   entry.decrease_current_button = decrease_current_button;
   entry.enable_switch = enable_switch;
 
-  if (increase_current_button) {
+  if (increase_current_button)
     increase_current_button->set_parent(this, address, TWCDirectorCurrentButton::INCREASE);
-  }
-
-  if (decrease_current_button) {
+  if (decrease_current_button)
     decrease_current_button->set_parent(this, address, TWCDirectorCurrentButton::DECREASE);
-  }
-
   if (enable_switch) {
     enable_switch->set_parent(this, address);
-    // Default to enabled (switch ON)
     entry.enabled = true;
   }
 
