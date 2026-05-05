@@ -92,7 +92,11 @@ void TWCDirectorComponent::setup() {
 
   for (auto &evse : evse_entries_) {
     this->publish_binary_sensor_if_changed_(evse.online, false);
-    if (evse.session_current) evse.session_current->publish_state(0.0f);
+    // Do NOT publish 0 to session_current here. The NVS-restored value will
+    // be applied via control() shortly after setup().  Publishing 0 here
+    // would write 0 to NVS and cause the 0A-offer bug on every cold start.
+    // session_current is initialised safely in control() (TYPE_SESSION) where
+    // a 0A value is clamped to the entity max before reaching the core.
   }
 }
 
@@ -104,10 +108,7 @@ void TWCDirectorComponent::loop() {
 
   // Sync desired currents from number entities BEFORE master tick so that
   // reconcile_current_allocation() inside twc_core_master_tick() sees the
-  // correct values on the very first tick after boot restore.  Without this
-  // pre-sync there is a one-loop-cycle delay: the number entity restores its
-  // value, sync runs AFTER master_tick, and the first status transition log
-  // captures applied_initial_current_a = 0 instead of the real value.
+  // correct values on the very first tick after boot restore.
   for (auto &evse : this->evse_entries_) {
     if (evse.bound) this->sync_desired_current_(evse);
   }
@@ -397,8 +398,12 @@ void TWCDirectorComponent::update_evse_sensors_(EvseEntry &evse, uint32_t now) {
   this->publish_text_sensor_if_changed_(evse.status_text, status_str);
   evse.last_status_code = status_code;
 
-  // Session current: actual amps drawn, from FD E0 slave heartbeat reportedActual.
-  // TWC Gen2 has NO per-phase current data in the FD EB frame.
+  // Session current: actual amps the car is drawing.
+  // Gated by status_code: when status == TWC_HB_READY (0x00) the slave is
+  // idle and we return 0 regardless of current_available_a.  The FD E2
+  // slave linkready frame stores max_allowable_current in the same byte
+  // position as reportedActual in FD E0; without this gate a pre-handshake
+  // FD E2 (e.g. 32A capacity) triggers a false "charging started" every boot.
   float session_amps = this->compute_session_amps_(dev);
   bool contactor_closed = (session_amps > 0.1f);
   this->publish_binary_sensor_if_changed_(evse.contactor_status, contactor_closed);
@@ -415,13 +420,21 @@ void TWCDirectorComponent::update_evse_sensors_(EvseEntry &evse, uint32_t now) {
         twc_core_set_desired_session_current(&this->core_, evse.address, available_a);
       }
     } else if (!was_zero && !is_nonzero) {
-      // Charging stopped: zero out session number and all stale meter readings.
-      if (evse.session_current->state > 0.1f) {
-        ESP_LOGI(TAG, "TWC 0x%04X: charging stopped, resetting session current to 0",
-                 evse.address);
-        evse.session_current->publish_state(0.0f);
+      // Charging stopped: reset session_current NUMBER to the initial_current
+      // value so NVS retains a valid offer for the next connection.
+      // Resetting to 0 would cause a 0x09 avail=0 when the car next connects,
+      // putting it into an error state.
+      float reset_val = this->evse_max_current_limit_a_;
+      if (evse.initial_current && evse.initial_current->has_state() &&
+          evse.initial_current->state > 0.1f) {
+        reset_val = evse.initial_current->state;
       }
-      // Clear stale HA-retained values so they don't linger between sessions.
+      ESP_LOGI(TAG, "TWC 0x%04X: charging stopped, resetting session current to %.1fA",
+               evse.address, reset_val);
+      evse.session_current->publish_state(reset_val);
+      twc_core_set_desired_session_current(&this->core_, evse.address, reset_val);
+
+      // Zero out read-only sensor values so they don't linger in HA.
       this->publish_sensor_(evse.session_current_sensor, 0.0f);
       this->publish_sensor_(evse.meter_voltage_phase_a, 0.0f);
       this->publish_sensor_(evse.meter_voltage_phase_b, 0.0f);
@@ -468,9 +481,7 @@ void TWCDirectorComponent::update_evse_sensors_(EvseEntry &evse, uint32_t now) {
   this->publish_text_sensor_if_changed_(evse.vehicle_vin, vin_str);
 
   // FD EB frame: kWh(4) + voltageA(2) + voltageB(2) + voltageC(2).
-  // There are NO per-phase current bytes in TWC Gen2 — do not publish
-  // meter_current_phase_a/b/c; the C library getters read voltage bytes
-  // and produce garbage values (e.g. 228V misread as 114A).
+  // There are NO per-phase current bytes in TWC Gen2.
   this->publish_sensor_(evse.meter_voltage_phase_a, twc_device_get_phase_a_voltage_v(dev));
   this->publish_sensor_(evse.meter_voltage_phase_b, twc_device_get_phase_b_voltage_v(dev));
   this->publish_sensor_(evse.meter_voltage_phase_c, twc_device_get_phase_c_voltage_v(dev));
@@ -484,10 +495,12 @@ void TWCDirectorComponent::update_evse_sensors_(EvseEntry &evse, uint32_t now) {
 
 float TWCDirectorComponent::compute_session_amps_(const twc_device_t *dev) const {
   if (!dev) return 0.0f;
-  // TWC Gen2 FD EB frame: kWh(4) + voltageA(2) + voltageB(2) + voltageC(2).
-  // There are NO per-phase current bytes. twc_device_get_phase_a/b/c_current_a()
-  // read the voltage bytes and return garbage (e.g. 228V -> 114A).
-  // The only real current data is reportedActual from the FD E0 slave heartbeat.
+  // Gate on status_code: TWC_HB_READY (0x00) means idle.
+  // The FD E2 slave linkready frame stores max_allowable_current in the same
+  // byte position as reportedActual in FD E0.  Without this gate the 32A
+  // capacity value from FD E2 triggers a false "charging started" at every boot.
+  // Only return a non-zero value when the TWC reports an active status.
+  if (twc_device_get_status_code(dev) == 0) return 0.0f;
   return twc_device_get_current_available_a(dev);
 }
 
@@ -667,18 +680,23 @@ void TWCDirectorEnableSwitch::write_state(bool state) {
 }
 
 void TWCDirectorCurrentNumber::control(float value) {
-  // Clamp to this entity's declared min/max BEFORE passing to the parent or
-  // publishing to HA.  On boot, ESPHome calls control() with the previously
-  // saved NVS value.  If a higher limit was in effect when it was saved (e.g.
-  // 32A stored under old firmware, now re-flashed with a 16A max entity), the
-  // raw value must be clamped here so that:
-  //   1. The HA entity displays the correct safe value (not the stale 32A).
-  //   2. The core receives the clamped value and never offers more than the
-  //      configured maximum to the TWC.
+  // Clamp to entity min/max first so NVS-restored values from old firmware
+  // (e.g. 32A saved when the limit was 32A, now re-flashed at 16A max) are
+  // corrected before reaching the core or HA.
   float min_v = this->traits.get_min_value();
   float max_v = this->traits.get_max_value();
   if (value < min_v) value = min_v;
   if (value > max_v) value = max_v;
+
+  // Session current: 0A is never a valid offer to the car.
+  // On first boot (no NVS), after a "charging stopped" reset that stored 0,
+  // or any time NVS restores 0, clamp up to the entity's configured max so a
+  // safe value is always ready before the car connects.  NVS will then store
+  // the corrected value for the next boot.
+  if (this->type_ == TYPE_SESSION && value < 1.0f) {
+    value = max_v;
+    ESP_LOGW(TAG, "Session current 0A clamped to %.1fA (safe default for next session)", value);
+  }
 
   const char *type_str = (this->type_ == TYPE_MAX) ? "max" :
                          (this->type_ == TYPE_SESSION) ? "session" :
@@ -802,9 +820,7 @@ void TWCDirectorComponent::add_evse(
   entry.vehicle_connected = vehicle_connected;
   entry.vehicle_vin = vehicle_vin;
 
-  // TWC Gen2 FD EB has no per-phase current data; null these out so they
-  // are never published. The yaml schema parameters are accepted for
-  // forward compatibility but the sensor pointers are intentionally ignored.
+  // TWC Gen2 FD EB has no per-phase current data; null these out.
   (void)meter_current_phase_a;
   (void)meter_current_phase_b;
   (void)meter_current_phase_c;
