@@ -398,15 +398,6 @@ void TWCDirectorComponent::update_evse_sensors_(EvseEntry &evse, uint32_t now) {
   this->publish_text_sensor_if_changed_(evse.status_text, status_str);
   evse.last_status_code = status_code;
 
-  // Session current: the current the TWC is offering (set by master, echoed
-  // back in FD E0 slave heartbeat bytes[1:2]).  Gated on PERIPHERAL mode:
-  // during UNCONF_PERIPHERAL the device sends FD E2 (slave linkready) where
-  // bytes[1:2] hold max_allowable_current (the TWC's 32A capacity), not an
-  // offered amount.  The previous status_code==0 gate was wrong: FD E2's
-  // sign byte (0x33) occupies the status byte position, so status != 0 and
-  // the gate passed, triggering a false "charging started (32A)" every boot.
-  // Once in PERIPHERAL mode the E1/E2 burst + heartbeat handshake is complete
-  // and FD E0 bytes[1:2] correctly reflect the configured current limit.
   float session_amps = this->compute_session_amps_(dev);
   bool contactor_closed = (session_amps > 0.1f);
   this->publish_binary_sensor_if_changed_(evse.contactor_status, contactor_closed);
@@ -496,16 +487,26 @@ void TWCDirectorComponent::update_evse_sensors_(EvseEntry &evse, uint32_t now) {
 
 float TWCDirectorComponent::compute_session_amps_(const twc_device_t *dev) const {
   if (!dev) return 0.0f;
-  // Only return offered current for devices in confirmed PERIPHERAL mode.
-  // During UNCONF_PERIPHERAL the device sends FD E2 (slave linkready) where
-  // bytes[1:2] hold max_allowable_current (the TWC's 32A capacity), NOT an
-  // offered amount.  The previous status_code==0 gate was insufficient because
-  // FD E2's sign byte (0x33) occupies the same byte position as the status byte
-  // in FD E0, so status = 0x33 != 0 and the gate never fired, allowing the 32A
-  // capacity to trigger a false "charging started (32A)" on every boot.
-  // Once the device is in PERIPHERAL mode the E1/E2 burst + heartbeat handshake
-  // is complete and FD E0 bytes[1:2] correctly reflect the configured limit.
-  if (twc_device_get_mode(dev) != TWC_MODE_PERIPHERAL) return 0.0f;
+  // current_available_a is populated from the last received frame.
+  // FD E2 (slave linkready) stores max_allowable_current in the same byte
+  // position as the configured current limit in FD E0 (slave heartbeat).
+  // The FD E2 sign byte (0x33 = 51) lands at the status byte offset.
+  //
+  // Critical insight: ALL valid TWC charge-state codes fit in 0x00..0x0F:
+  //   0x00 Ready,  0x01 Charging,   0x03 Waiting,  0x04 Negotiating,
+  //   0x08 Charge Started,  0x09 Setting Limit,  0x0A Adjustment Complete.
+  // The FD E2 sign byte 0x33 = 51, which is >= 0x10 and outside the valid
+  // range.  When status >= 0x10 the value in current_available_a is the
+  // TWC's raw 32A capacity from max_allowable_current — NOT the configured
+  // or offered current.  Return 0 to suppress the false "charging started
+  // (32A)" triggered at every boot before the handshake completes.
+  //
+  // Why previous gates failed:
+  //   status == 0:         FD E2 sign byte 0x33 != 0  → gate passed.
+  //   mode != PERIPHERAL:  a previously-paired TWC is immediately classified
+  //                        PERIPHERAL when FD E2 with sign=0x33 is received
+  //                        → gate passed.
+  if (twc_device_get_status_code(dev) >= 0x10) return 0.0f;
   return twc_device_get_current_available_a(dev);
 }
 
