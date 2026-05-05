@@ -398,12 +398,15 @@ void TWCDirectorComponent::update_evse_sensors_(EvseEntry &evse, uint32_t now) {
   this->publish_text_sensor_if_changed_(evse.status_text, status_str);
   evse.last_status_code = status_code;
 
-  // Session current: actual amps the car is drawing.
-  // Gated by status_code: when status == TWC_HB_READY (0x00) the slave is
-  // idle and we return 0 regardless of current_available_a.  The FD E2
-  // slave linkready frame stores max_allowable_current in the same byte
-  // position as reportedActual in FD E0; without this gate a pre-handshake
-  // FD E2 (e.g. 32A capacity) triggers a false "charging started" every boot.
+  // Session current: the current the TWC is offering (set by master, echoed
+  // back in FD E0 slave heartbeat bytes[1:2]).  Gated on PERIPHERAL mode:
+  // during UNCONF_PERIPHERAL the device sends FD E2 (slave linkready) where
+  // bytes[1:2] hold max_allowable_current (the TWC's 32A capacity), not an
+  // offered amount.  The previous status_code==0 gate was wrong: FD E2's
+  // sign byte (0x33) occupies the status byte position, so status != 0 and
+  // the gate passed, triggering a false "charging started (32A)" every boot.
+  // Once in PERIPHERAL mode the E1/E2 burst + heartbeat handshake is complete
+  // and FD E0 bytes[1:2] correctly reflect the configured current limit.
   float session_amps = this->compute_session_amps_(dev);
   bool contactor_closed = (session_amps > 0.1f);
   this->publish_binary_sensor_if_changed_(evse.contactor_status, contactor_closed);
@@ -420,10 +423,8 @@ void TWCDirectorComponent::update_evse_sensors_(EvseEntry &evse, uint32_t now) {
         twc_core_set_desired_session_current(&this->core_, evse.address, available_a);
       }
     } else if (!was_zero && !is_nonzero) {
-      // Charging stopped: reset session_current NUMBER to the initial_current
-      // value so NVS retains a valid offer for the next connection.
-      // Resetting to 0 would cause a 0x09 avail=0 when the car next connects,
-      // putting it into an error state.
+      // Charging stopped: reset session_current to initial_current value so
+      // NVS retains a valid offer for the next connection.
       float reset_val = this->evse_max_current_limit_a_;
       if (evse.initial_current && evse.initial_current->has_state() &&
           evse.initial_current->state > 0.1f) {
@@ -495,12 +496,16 @@ void TWCDirectorComponent::update_evse_sensors_(EvseEntry &evse, uint32_t now) {
 
 float TWCDirectorComponent::compute_session_amps_(const twc_device_t *dev) const {
   if (!dev) return 0.0f;
-  // Gate on status_code: TWC_HB_READY (0x00) means idle.
-  // The FD E2 slave linkready frame stores max_allowable_current in the same
-  // byte position as reportedActual in FD E0.  Without this gate the 32A
-  // capacity value from FD E2 triggers a false "charging started" at every boot.
-  // Only return a non-zero value when the TWC reports an active status.
-  if (twc_device_get_status_code(dev) == 0) return 0.0f;
+  // Only return offered current for devices in confirmed PERIPHERAL mode.
+  // During UNCONF_PERIPHERAL the device sends FD E2 (slave linkready) where
+  // bytes[1:2] hold max_allowable_current (the TWC's 32A capacity), NOT an
+  // offered amount.  The previous status_code==0 gate was insufficient because
+  // FD E2's sign byte (0x33) occupies the same byte position as the status byte
+  // in FD E0, so status = 0x33 != 0 and the gate never fired, allowing the 32A
+  // capacity to trigger a false "charging started (32A)" on every boot.
+  // Once the device is in PERIPHERAL mode the E1/E2 burst + heartbeat handshake
+  // is complete and FD E0 bytes[1:2] correctly reflect the configured limit.
+  if (twc_device_get_mode(dev) != TWC_MODE_PERIPHERAL) return 0.0f;
   return twc_device_get_current_available_a(dev);
 }
 
@@ -689,10 +694,7 @@ void TWCDirectorCurrentNumber::control(float value) {
   if (value > max_v) value = max_v;
 
   // Session current: 0A is never a valid offer to the car.
-  // On first boot (no NVS), after a "charging stopped" reset that stored 0,
-  // or any time NVS restores 0, clamp up to the entity's configured max so a
-  // safe value is always ready before the car connects.  NVS will then store
-  // the corrected value for the next boot.
+  // Clamp to max_v so NVS always stores a safe value.
   if (this->type_ == TYPE_SESSION && value < 1.0f) {
     value = max_v;
     ESP_LOGW(TAG, "Session current 0A clamped to %.1fA (safe default for next session)", value);
