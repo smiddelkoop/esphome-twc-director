@@ -356,6 +356,13 @@ static void reconcile_current_allocation(twc_core_t *core) {
 
 static bool is_charging_state(int status_code) {
   switch (status_code) {
+    case 0x03:  // Waiting: car connected, waiting for current limit from master.
+                // current_available_a is 0 in this state (TWC hasn't confirmed
+                // the limit yet), so is_drawing is false.  Including Waiting here
+                // ensures reconcile_session_current_allocation considers the device
+                // eligible and schedules the 0x09 session limit command.
+    case 0x04:  // Negotiating: car actively negotiating charging parameters.
+                // Same reasoning as Waiting — 0x09 must be sent to proceed.
     case TWC_HB_CHARGING:
     case TWC_HB_CHARGE_STARTED:
     case TWC_HB_SETTING_LIMIT:
