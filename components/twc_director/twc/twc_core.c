@@ -646,7 +646,23 @@ void twc_core_master_tick(twc_core_t *core, uint32_t now_ms) {
   if (handle_startup_burst(core, now_ms)) return;
   if (core->startup_burst_active) return;
 
+  // Reconcile both initial-current (0x05) and session-current (0x09) every tick.
+  //
+  // reconcile_session_current_allocation was previously only called from
+  // handle_frame (was_drawing != now_drawing edge) and from set_desired/
+  // set_max helpers.  On car reconnect, current_available_a stays at 0A
+  // throughout Waiting(0x03) and Negotiating(0x04) — the TWC does not echo
+  // the session limit back until it receives a valid 0x09.  No drawing
+  // transition fires, so reconcile_session never ran, pending_session_current_cmd
+  // was never set, and 0x09 was never sent even though is_charging_state
+  // correctly returns true for 0x03/0x04.
+  //
+  // Calling it here every tick ensures that the moment is_charging_state
+  // returns true, desired(16A) != applied(0A) triggers changed=true,
+  // pending_session_current_cmd is set, and 0x09 fires on the next heartbeat.
   reconcile_current_allocation(core);
+  reconcile_session_current_allocation(core, 0);
+
   if (send_info_probe(core, now_ms)) return;
   send_heartbeat(core, now_ms);
 }
